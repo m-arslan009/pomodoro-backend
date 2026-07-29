@@ -1,0 +1,28 @@
+## Local PostgreSQL for development only — this is NOT a deployment artifact.
+## It exists so `DATABASE_URL` in .env has something to point at while working locally.
+##
+## Start with `npm run db:up`, stop with `npm run db:down`.
+## If you already run Postgres another way (local install, `npx prisma dev`, or a hosted
+## database), ignore this file and just set DATABASE_URL to that instead.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: evergrove-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: evergrove
+      POSTGRES_PASSWORD: evergrove
+      POSTGRES_DB: evergrove
+    ports:
+      - '5432:5432'
+    volumes:
+      - evergrove-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U evergrove -d evergrove']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  evergrove-pgdata:

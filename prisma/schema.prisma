@@ -1,0 +1,65 @@
+// Evergrove backend — Prisma schema.
+//
+// Scope: identity only. Per the approved data model, `users` holds identity and credentials —
+// facts the user asserts that the system cannot derive. Everything derived, high-frequency, or
+// rebuildable lives elsewhere: preferences in `user_settings`, progression in the
+// `user_gamification` projection, history in the `timer_intervals` event log. Those tables are
+// designed but deliberately not created yet.
+//
+// There is no session table. Authentication is a self-contained signed token that the server
+// keeps no record of, so a sign-in writes nothing but `last_login_at`.
+//
+// The connection URL lives in ../prisma.config.ts (Prisma 7 no longer accepts `url` here).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// An account. Identity and credentials only — never points, titles, settings or counters.
+model User {
+  /// UUIDv7: time-ordered, so index locality on insert is sequential rather than random.
+  /// Not a sequence — ids appear in URLs and exports, where they would leak the user count.
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Normalised to trim+lowercase at the DTO boundary; a CHECK constraint pins the invariant.
+  email String @unique @db.VarChar(320)
+
+  /// The handle as the user typed it (trimmed). Rendered publicly as `@username`.
+  username String @db.VarChar(20)
+
+  /// lower(username). Carries the UNIQUE index so uniqueness is case-insensitive without the
+  /// `citext` extension ADR-003 rejected. Maintained in the repository AND by a CHECK
+  /// constraint, so no writer can desynchronise it from `username`.
+  usernameLower String @unique @map("username_lower") @db.VarChar(20)
+
+  firstName String @map("first_name") @db.VarChar(50)
+  lastName  String @map("last_name") @db.VarChar(50)
+
+  /// Argon2id encoded string — carries its own salt and parameters, so no salt/algo columns.
+  passwordHash String @map("password_hash") @db.VarChar(255)
+
+  /// IANA zone name. Load-bearing: every stored instant for this account is read through it.
+  timezone String @default("UTC") @db.VarChar(64)
+
+  /// Ships nullable and unused, so email verification is later a pure addition rather than a
+  /// behavioural migration. Nothing may gate on it until that flow exists.
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
+
+  /// Audit only. Authentication is stateless (ADR-008), so nothing consults this to invalidate a
+  /// token — it records *when* the credential changed, for a future security panel.
+  passwordChangedAt DateTime @default(now()) @map("password_changed_at") @db.Timestamptz(3)
+
+  /// The only record that a sign-in happened, now that sessions are not persisted at all.
+  lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("users")
+}

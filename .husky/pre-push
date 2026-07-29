@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+echo "Running pre-push validation..."
+
+if ! npm run verify; then
+  echo "Pre-push validation failed. Push cancelled."
+  exit 1
+fi
+
+# E2E is opt-in: it boots the app against a real PostgreSQL instance, so it must never be a
+# mandatory precondition for pushing. Enable with EVERGROVE_PREPUSH_E2E=1 when a database is up.
+if [ "$EVERGROVE_PREPUSH_E2E" = "1" ]; then
+  echo "EVERGROVE_PREPUSH_E2E=1 — running end-to-end tests..."
+  if ! npm run test:e2e; then
+    echo "Pre-push end-to-end tests failed. Push cancelled."
+    exit 1
+  fi
+fi
+
+echo "Pre-push validation passed."
