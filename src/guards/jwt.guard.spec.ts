@@ -65,6 +65,7 @@ function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
     emailVerifiedAt: null,
     passwordChangedAt: NOW,
     lastLoginAt: null,
+    avatarUpdatedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -135,6 +136,7 @@ describe('JwtGuard', () => {
         lastName: 'Lovelace',
         timezone: 'Europe/London',
         emailVerified: true,
+        avatarUpdatedAt: null,
         createdAt: NOW.toISOString(),
       });
     });

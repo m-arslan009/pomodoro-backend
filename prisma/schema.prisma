@@ -58,8 +58,38 @@ model User {
   /// The only record that a sign-in happened, now that sessions are not persisted at all.
   lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(3)
 
+  /// When the avatar last changed, or null when there is none. Denormalised from `user_avatars`
+  /// and written in the same transaction, so the hot path can answer "has a photo, is it fresh?"
+  /// without ever loading the bytes.
+  avatarUpdatedAt DateTime? @map("avatar_updated_at") @db.Timestamptz(3)
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
+  avatar UserAvatar?
+
   @@map("users")
+}
+
+/// A profile photo, stored as bytes in Postgres (ADR-015 rev. 2).
+///
+/// Deliberately its own table rather than columns on `users`: JwtGuard reads the user row on every
+/// authenticated request, so bytes living there would be loaded by every call the application ever
+/// makes. Nothing reads this table except the one endpoint that serves the image.
+model UserAvatar {
+  userId String @id @map("user_id") @db.Uuid
+
+  /// Bounded above the database — multer refuses the upload past 256 KB and the domain re-checks.
+  data Bytes
+
+  contentType String @map("content_type") @db.VarChar(32)
+  byteSize    Int    @map("byte_size")
+  width       Int    @db.SmallInt
+  height      Int    @db.SmallInt
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_avatars")
 }

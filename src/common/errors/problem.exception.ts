@@ -61,6 +61,15 @@ export function invalidCredentialsProblem(): ProblemException {
   });
 }
 
+/** The resource exists in the API but not for this account — an avatar nobody has set, say. */
+export function notFoundProblem(detail: string): ProblemException {
+  return new ProblemException({
+    status: HttpStatus.NOT_FOUND,
+    title: 'Not found',
+    detail,
+  });
+}
+
 /** No usable access token: absent, malformed, expired or foreign — all indistinguishable. */
 export function notAuthenticatedProblem(): ProblemException {
   return new ProblemException({

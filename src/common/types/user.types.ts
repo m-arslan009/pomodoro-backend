@@ -19,6 +19,7 @@ export interface UserRecord {
   readonly emailVerifiedAt: Date | null;
   readonly passwordChangedAt: Date;
   readonly lastLoginAt: Date | null;
+  readonly avatarUpdatedAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -32,6 +33,8 @@ export interface UserProfile {
   readonly lastName: string;
   readonly timezone: string;
   readonly emailVerified: boolean;
+  /** When the avatar last changed, or null when there is none. The bytes are never inlined here. */
+  readonly avatarUpdatedAt: string | null;
   readonly createdAt: string;
 }
 
@@ -57,6 +60,7 @@ export function toUserProfile(user: UserRecord): UserProfile {
     // Exposed as a boolean rather than the timestamp: the client only ever needs the state, and
     // shipping it now means the future verification banner needs no contract change.
     emailVerified: user.emailVerifiedAt !== null,
+    avatarUpdatedAt: user.avatarUpdatedAt?.toISOString() ?? null,
     createdAt: user.createdAt.toISOString(),
   };
 }

@@ -7,10 +7,12 @@ import type { Env } from '../config/env.schema';
 import { AuthController } from '../controllers/auth.controller';
 import { UserController } from '../controllers/user.controller';
 import { JwtGuard } from '../guards/jwt.guard';
+import { UserAvatarRepository } from '../repositories/user-avatar.repository';
 import { UserRepository } from '../repositories/user.repository';
 import { AccessTokenService } from '../services/access-token.service';
 import { Argon2PasswordHasher } from '../services/argon2-password-hasher.service';
 import { AuthService } from '../services/auth.service';
+import { AvatarService } from '../services/avatar.service';
 import { SystemClock } from '../services/system-clock.service';
 import { UserService } from '../services/user.service';
 
@@ -45,9 +47,11 @@ import { UserService } from '../services/user.service';
   providers: [
     AuthService,
     UserService,
+    AvatarService,
     AccessTokenService,
     JwtGuard,
     UserRepository,
+    UserAvatarRepository,
     { provide: PasswordHasher, useClass: Argon2PasswordHasher },
     { provide: Clock, useClass: SystemClock },
   ],

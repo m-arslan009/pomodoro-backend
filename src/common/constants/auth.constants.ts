@@ -13,3 +13,12 @@ export const CREDENTIAL_THROTTLE = {
   limit: 5,
   ttl: 60_000,
 } as const;
+
+/**
+ * Avatar uploads. Looser than the credential limit — this is not a guessing attack surface — but
+ * far tighter than the global default, because each accepted request writes a quarter-megabyte.
+ */
+export const AVATAR_THROTTLE = {
+  limit: 10,
+  ttl: 60_000,
+} as const;

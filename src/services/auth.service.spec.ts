@@ -73,6 +73,7 @@ function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
     emailVerifiedAt: null,
     passwordChangedAt: NOW,
     lastLoginAt: null,
+    avatarUpdatedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -273,6 +274,7 @@ describe('AuthService', () => {
         lastName: 'Lovelace',
         timezone: 'Europe/London',
         emailVerified: false,
+        avatarUpdatedAt: null,
         createdAt: NOW.toISOString(),
       },
     };
