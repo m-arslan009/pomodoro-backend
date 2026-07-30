@@ -241,3 +241,41 @@ genuine implementation issue.
 sign-up form renders, and the `ProblemDetailsFilter` that produces the RFC 9457 body the frontend's
 `toApiError()` parses. Specs added for all three. No production code changed and no test executed —
 the suite is left for the pre-push hook, so the new specs are typechecked and linted but unrun.
+
+---
+
+`Title`: Establish CONTRACT.md as the shared profile contract and define a phased, frontend-first workflow
+
+`User prompt`: The profile analysis and implementation roadmap have already been completed and approved. Do not repeat the analysis or create another implementation plan. Instead, use the existing plan as the basis for execution.
+
+Before implementing any profile changes, update CONTRACT.md to become the shared contract for the profile feature across both the frontend and backend repositories. Record all agreed profile decisions, including the data model, supported profile fields (including timezone), validation rules, API request/response contracts, authentication and ownership rules, error handling, frontend/backend responsibilities, state synchronisation expectations, implementation constraints, deferred features, and any relevant ADR references. This document should define the expected behaviour so both repositories remain consistent throughout development.
+
+Also add an Implementation Strategy section describing how profile work will be executed: implement one phase at a time; complete the frontend portion first, then update the backend only as required to satisfy the agreed contract; after each phase, verify the complete flow before moving to the next; do not implement future phases until the current phase is complete and approved; any change to a feature, function, API, model, validation rule, or behaviour must be reflected in CONTRACT.md before implementation so both repositories stay aligned.
+
+Do not implement any code in this step. Only update CONTRACT.md so it serves as the authoritative reference for all subsequent profile development.
+
+---
+
+`Title`: Implement the backend profile feature enhancement from CONTRACT.md
+
+`User prompt`: Implement the Backend Profile Feature Enhancement according to the specifications defined in CONTRACT.md. The contract document is the single source of truth for all profile-related requirements, API behaviour, data models, validation rules, and architectural decisions. Do not analyse or modify frontend code. Do not redesign existing behaviour.
+
+Implement the required backend profile enhancements, including: existing profile update functionality alignment; required profile fields and validation; timezone support if defined in the contract; profile image upload/update functionality if defined in the contract; secure ownership handling using the authenticated user identity; and correct API responses and error handling according to existing project conventions.
+
+For profile image functionality: follow only the storage and architecture decisions defined in CONTRACT.md; implement upload/update handling as specified; validate image input according to the contract; ensure users can only modify their own profile image; maintain existing behaviour when no image exists.
+
+Implementation rules: keep the existing authentication flow unchanged; do not add refresh tokens or unrelated authentication features; do not introduce unnecessary endpoints or abstractions; do not refactor unrelated modules; do not create test cases in this phase; keep the implementation simple and consistent with the current backend architecture.
+
+## Phase 4 (backend) — core profile test cases
+
+`Title`: Write backend test cases for the implemented profile feature
+
+`User prompt`: Write backend test cases only for the implemented Profile feature. The backend already has pre-push test enforcement configured, so do not run the test suite and do not modify any pre-push configuration.
+
+Focus exclusively on the profile module and its directly related files. Do not analyse, modify, or refactor unrelated modules, features, or authentication functionality unless a profile test has a direct dependency on them.
+
+Review the existing profile implementation and CONTRACT.md, then create or update only the tests required to cover the implemented profile behaviour. Cover the core profile functionality: fetch authenticated user's profile; update supported profile fields; profile image upload/update; profile image retrieval behaviour; timezone update; request validation; authentication and ownership checks; successful profile updates; error responses for invalid input; error responses for unauthorised or forbidden access; image validation (size/type); existing behaviour when no profile image exists.
+
+Do not write tests for: the authentication module (login, registration, logout); future or deferred profile features; unrelated controllers, services, or repositories; performance, load, or end-to-end tests.
+
+Reuse the existing backend testing patterns and utilities. Keep the test suite simple, maintainable, and aligned with the current implementation. Avoid duplicate tests, unnecessary abstractions, excessive comments, or production code changes unless a genuine defect preventing the implemented profile behaviour is discovered.
