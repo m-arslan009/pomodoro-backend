@@ -279,3 +279,61 @@ Review the existing profile implementation and CONTRACT.md, then create or updat
 Do not write tests for: the authentication module (login, registration, logout); future or deferred profile features; unrelated controllers, services, or repositories; performance, load, or end-to-end tests.
 
 Reuse the existing backend testing patterns and utilities. Keep the test suite simple, maintainable, and aligned with the current implementation. Avoid duplicate tests, unnecessary abstractions, excessive comments, or production code changes unless a genuine defect preventing the implemented profile behaviour is discovered.
+
+## Settings phase — feature analysis and planning
+
+`Title`: Analyse and plan the Settings feature against CONTRACT.md
+
+`User prompt`: Analyse `product_analysis.md`, `backend_architecture.md`, and `CONTRACT.md` to create the implementation plan for the Settings feature.
+
+`CONTRACT.md` is the single source of truth for frontend-backend communication. Any feature behaviour, API contract, data model, validation rule, endpoint definition, or implementation decision must follow `CONTRACT.md`. If `product_analysis.md` or `backend_architecture.md` conflicts with `CONTRACT.md`, identify the conflict and recommend the required update instead of silently choosing an approach.
+
+Do not implement any code, modify files, or create tests in this phase. The objective is only analysis, architectural review, and planning.
+
+Do not blindly follow the existing implementation. Evaluate the best approach based on product requirements, current architecture, maintainability, simplicity, scalability where required, and consistency between frontend and backend. Identify what should be kept, updated, replaced, removed, and added.
+
+Determine: what belongs inside Settings and what should remain part of Profile, Authentication, or other modules; which features are required for the current product version and which should be deferred; correct architectural decisions that should remain unchanged; decisions needing improvement; over-engineered or unnecessary functionality; missing requirements; conflicting requirements.
+
+Define the backend design plan, including for every Settings operation: HTTP method, complete endpoint URL, purpose, authentication requirement, request body/query parameters, response structure, validation rules, and possible error responses. Review the data model for required entities, fields, relationships, reusable models, and fields that should be removed or avoided.
+
+Identify all required updates to `CONTRACT.md` before implementation: new endpoints, request/response contracts, data models, validation rules, frontend/backend responsibilities, error handling rules, and deferred features.
+
+Create a phased execution plan where each phase includes goal, frontend tasks, backend tasks, contract updates required, files expected to change, dependencies, manual verification steps, and completion criteria. Implement one phase at a time; keep frontend and backend synchronized through `CONTRACT.md`; do not implement functionality that is already complete and correctly aligned; reuse existing functions, components, services, and patterns; only update code when it is incomplete, inconsistent, or violates the agreed architecture; do not create tests during implementation planning; avoid unnecessary complexity, abstractions, comments, or unrelated refactoring; do not introduce features outside the agreed scope.
+
+## Settings phase — record the contract
+
+`Title`: Write the Settings contract as the shared reference
+
+`User prompt`: write/update CONTRACT.md as a source of reference for both frontend and backend
+
+## Reusable Claude Skills — analysis and first increment
+
+`Title`: Introduce reusable Claude Skills for repetitive workflows
+
+`User prompt`: Analyze our previous conversations and identify repetitive workflows that are performed frequently throughout this project. The goal is to reduce prompt size, improve consistency, and eliminate repeated instructions by introducing reusable Claude Skills.
+
+Phase 1 — Analysis: identify recurring tasks that are performed repeatedly across multiple conversations, follow a predictable sequence of steps, require similar instructions every time, would significantly reduce tokens if encapsulated into a reusable skill, and are generic enough to work for future features. Do not propose skills for one-off or highly specific tasks. For each repetitive workflow provide: workflow name, why it is repetitive, typical sequence of actions, estimated frequency, estimated token savings, and priority (High / Medium / Low).
+
+Phase 2 — Draft Skills: for each proposed skill include skill name, purpose, when Claude should invoke it, inputs, outputs, scope, responsibilities, things explicitly out of scope, dependencies on other `.claude` resources, and estimated prompt reduction. Keep every draft single-responsibility, token-efficient, generic, easy to compose with other skills, and independent whenever possible.
+
+Candidate areas to recommend only if the conversation history justifies them: feature analysis and planning; contract-first development; frontend implementation workflow; backend implementation workflow; frontend/backend synchronization; verification before completion; cleanup and dead-code removal; architecture consistency review; test implementation workflow; documentation updates; prompt recording; phase-based implementation planning; manual verification checklist generation.
+
+Deliverables: repetitive workflows; recommended skill hierarchy; draft specification for each skill; skills that should be merged; skills that should not be created because they would duplicate existing instructions; recommended implementation order (highest ROI first).
+
+Do not create any skills yet. Do not create the `.claude/skills` directory yet. Do not create any skill files. Do not modify project code or documentation. Wait for explicit approval before implementing any skill.
+
+Then, on approval: implement first increment (i.e. create skills that have priority: High).
+
+## Settings phase — S2 backend implementation
+
+`Title`: Implement the Settings feature backend, auditing existing code first
+
+`User prompt`: Implement the backend for the Settings feature by first analyzing the existing codebase to identify whether any part of this feature has already been implemented. If existing implementation, models, APIs, services, or related logic are present, review and update them according to the current requirements and project architecture; otherwise, implement the complete backend functionality from scratch following the existing coding standards, patterns, and best practices used in the project.
+
+Ensure all required backend components such as database models, migrations/schema changes, DTOs, services, controllers, validation, authentication/authorization handling, and API endpoints are properly integrated. Do not create any test cases at this stage; only focus on complete and production-ready implementation of the Settings feature backend.
+
+## Settings phase — S4 backend coverage
+
+`Title`: Verify existing Settings backend coverage before creating any tests
+
+`User prompt`: Verify whether test cases for the backend Settings feature have already been created. First, inspect the existing backend test suite and identify any tests that cover the Settings feature. If such tests exist, do not create new ones; instead, provide a concise summary of each test case, including the functionality it validates (e.g., GET settings, PATCH settings, validation, authentication/authorization, persistence, error handling, etc.), along with any important gaps or missing coverage. If no Settings feature tests exist, create a comprehensive test suite following the project's existing testing patterns and standards, covering all backend functionality, success and failure scenarios, validation, authorization. Before creating any tests, ensure they do not duplicate existing coverage, and implement only the missing test cases required for complete coverage.
