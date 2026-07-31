@@ -24,9 +24,19 @@ import { UserService } from '../services/user.service';
  * this file (ADR-005).
  *
  * JwtGuard, PasswordHasher and Clock are exported because every future feature module needs to
- * authenticate requests; the repositories are not, because nothing outside this module may read
- * the users table directly. AccessTokenService stays internal for the same reason — a feature
- * module has no business minting credentials.
+ * authenticate requests.
+ *
+ * AccessTokenService and UserRepository are exported *only* to make that work. A controller-scoped
+ * `@UseGuards(JwtGuard)` is constructed in the injector of the module declaring the controller, not
+ * in this one, so exporting the guard alone leaves a feature module unable to build it —
+ * SettingsModule fails at boot with "can't resolve dependencies of the JwtGuard". Exporting its two
+ * constructor arguments is the narrowest fix; the alternative is a global APP_GUARD, which would
+ * change the default for every route in the application.
+ *
+ * The intent that made them internal still holds and is now convention rather than structure:
+ * nothing outside this module may read the users table directly (ADR-020), and no feature module
+ * has any business minting credentials. A feature module that injects either into its own service
+ * is doing something wrong.
  */
 @Module({
   imports: [
@@ -55,6 +65,6 @@ import { UserService } from '../services/user.service';
     { provide: PasswordHasher, useClass: Argon2PasswordHasher },
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [JwtGuard, PasswordHasher, Clock],
+  exports: [JwtGuard, AccessTokenService, UserRepository, PasswordHasher, Clock],
 })
 export class AuthModule {}

@@ -8,6 +8,7 @@ import { HealthController } from './controllers/health.controller';
 import { type Env, validateEnv } from './config/env.schema';
 import { PrismaModule } from './database/prisma.module';
 import { AuthModule } from './modules/auth.module';
+import { SettingsModule } from './modules/settings.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { AuthModule } from './modules/auth.module';
 
     PrismaModule,
     AuthModule,
+    SettingsModule,
   ],
   controllers: [HealthController],
   providers: [

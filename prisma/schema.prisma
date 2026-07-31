@@ -1,9 +1,9 @@
 // Evergrove backend — Prisma schema.
 //
-// Scope: identity only. Per the approved data model, `users` holds identity and credentials —
-// facts the user asserts that the system cannot derive. Everything derived, high-frequency, or
-// rebuildable lives elsewhere: preferences in `user_settings`, progression in the
-// `user_gamification` projection, history in the `timer_intervals` event log. Those tables are
+// Scope: identity and preferences. Per the approved data model, `users` holds identity and
+// credentials — facts the user asserts that the system cannot derive. Everything derived,
+// high-frequency, or rebuildable lives elsewhere: preferences in `user_settings`, progression in
+// the `user_gamification` projection, history in the `timer_intervals` event log. The last two are
 // designed but deliberately not created yet.
 //
 // There is no session table. Authentication is a self-contained signed token that the server
@@ -66,7 +66,8 @@ model User {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  avatar UserAvatar?
+  avatar   UserAvatar?
+  settings UserSettings?
 
   @@map("users")
 }
@@ -92,4 +93,34 @@ model UserAvatar {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_avatars")
+}
+
+/// An account's preferences (CONTRACT.md §1.4).
+///
+/// The row is lazy: reading returns domain defaults when it is absent, and only a write creates it.
+/// So registration is untouched and every account that predates this table works without a backfill.
+///
+/// Scalars that have rules and that other features will eventually query are columns; the
+/// appearance blob is JSONB, which is the whole of ADR-003's "JSONB only for genuinely schemaless
+/// preferences" escape hatch. Zod validates the blob's shape on every write — Postgres does not.
+///
+/// Like `user_avatars`, this is deliberately not columns on `users`: JwtGuard reads the user row on
+/// every authenticated request, and preferences are needed by exactly one page.
+model UserSettings {
+  userId String @id @map("user_id") @db.Uuid
+
+  workMinutes  Int    @default(25) @map("work_minutes") @db.SmallInt
+  breakMinutes Int    @default(5) @map("break_minutes") @db.SmallInt
+  theme        String @default("system") @db.VarChar(16)
+
+  /// `customTheme`, `background` and `labels`. Merged key-wise on write, so two sections saving
+  /// at once accumulate rather than overwrite each other.
+  preferences Json @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
 }
