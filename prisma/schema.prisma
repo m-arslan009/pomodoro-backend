@@ -1,10 +1,12 @@
 // Evergrove backend — Prisma schema.
 //
-// Scope: identity and preferences. Per the approved data model, `users` holds identity and
-// credentials — facts the user asserts that the system cannot derive. Everything derived,
-// high-frequency, or rebuildable lives elsewhere: preferences in `user_settings`, progression in
-// the `user_gamification` projection, history in the `timer_intervals` event log. The last two are
-// designed but deliberately not created yet.
+// Scope: identity, preferences, and the timer. Per the approved data model, `users` holds identity
+// and credentials — facts the user asserts that the system cannot derive. Everything derived,
+// high-frequency, or rebuildable lives elsewhere: preferences in `user_settings`, work in `tasks`,
+// history in the `focus_sessions` event log, and progression in the `user_gamification` projection.
+//
+// `focus_sessions` was called `timer_intervals` in this comment while every index and constraint in
+// the architecture document named it `focus_sessions`. The table is `focus_sessions`.
 //
 // There is no session table. Authentication is a self-contained signed token that the server
 // keeps no record of, so a sign-in writes nothing but `last_login_at`.
@@ -66,8 +68,11 @@ model User {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  avatar   UserAvatar?
-  settings UserSettings?
+  avatar       UserAvatar?
+  settings     UserSettings?
+  tasks        Task[]
+  sessions     FocusSession[]
+  gamification UserGamification?
 
   @@map("users")
 }
@@ -123,4 +128,139 @@ model UserSettings {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_settings")
+}
+
+/// A unit of work a focus session can be run against (CONTRACT.md §13.1).
+///
+/// `status` is 'todo' | 'completed' | 'abandoned', pinned by a CHECK constraint. There is no
+/// 'expired' and no 24-hour expiry: real work spans days, and silently expiring an unfinished task
+/// overnight is a mechanic that annoys rather than motivates.
+///
+/// A task is *abandoned*; a session is *terminated*. They are different nouns for different things,
+/// and only an explicit user action moves a task between statuses — never a timer event.
+///
+/// Deletion is hard deletion. There is no `deleted_at`: a soft-deleted task would linger in the
+/// task-outcome chart forever, so the user's own statistics would keep counting work they
+/// explicitly erased. Sessions survive it through their title snapshot.
+model Task {
+  id     String @id @default(uuid(7)) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  title  String @db.VarChar(120)
+  status String @default("todo") @db.VarChar(16)
+
+  /// Ships nullable and unwritten by any UI — it is the estimation-calibration feature's column,
+  /// added now so that feature is a pure addition rather than a migration.
+  estimatedPomodoros Int? @map("estimated_pomodoros") @db.SmallInt
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions FocusSession[]
+
+  /// Deliberately NOT partial on `status = 'todo'`. Hydration fetches every status so History can
+  /// break down task outcomes, and a partial index would not serve that read.
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("tasks")
+}
+
+/// A finished focus or break interval. THE EVENT LOG — append-only and immutable (ADR-006).
+///
+/// There is no update path and no delete path: no `PATCH /sessions/:id` exists and none will. A
+/// correction would be a compensating record, not an edit. This table is the single source of truth
+/// from which History and every analytic are derived, which is only safe if nothing rewrites it.
+///
+/// Two columns are easy to get wrong:
+///   - `actualDurationMs` is CLIENT-REPORTED and then clamped, NOT `ended_at - started_at`. Pause
+///     exists, so a block paused for an hour has a 25-minute actual and an 85-minute span. A CHECK
+///     constraint stops the reported value exceeding the wall clock.
+///   - `taskTitleSnapshot` is CLIENT-SUPPLIED and stored verbatim, never derived from the `tasks`
+///     row. It is the title as the user saw it while focusing, so deleting or renaming the task
+///     afterwards cannot rewrite what the history says.
+model FocusSession {
+  id     String  @id @default(uuid(7)) @db.Uuid
+  userId String  @map("user_id") @db.Uuid
+  taskId String? @map("task_id") @db.Uuid
+
+  taskTitleSnapshot String @map("task_title_snapshot") @db.VarChar(120)
+
+  /// The client's own primary key, minted when the block starts. The outbox idempotency key.
+  clientSessionId String @map("client_session_id") @db.Uuid
+
+  type   String @db.VarChar(8)
+  status String @db.VarChar(16)
+
+  startedAt DateTime @map("started_at") @db.Timestamptz(3)
+  endedAt   DateTime @map("ended_at") @db.Timestamptz(3)
+  /// Server receive time. Audit only — the attribution decision it fed is stored below.
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(3)
+
+  /// The user-local calendar day this record counts toward, decided once at insert.
+  ///
+  /// Stored rather than recomputed, for three reasons. It makes replaying the log deterministic,
+  /// which is the property the whole projection rests on. It means a rebuild needs no access to the
+  /// users table, so the timer owns its own data end to end. And it means changing your timezone
+  /// does not silently rewrite which day last month's work happened on — the day you lived through
+  /// is a fact, not a view.
+  attributionDate DateTime @map("attribution_date") @db.Date
+
+  plannedDurationMs Int @map("planned_duration_ms")
+  actualDurationMs  Int @map("actual_duration_ms")
+
+  terminationReason String? @map("termination_reason") @db.VarChar(20)
+  pointsAwarded     Int     @default(0) @map("points_awarded")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  /// A retried outbox flush is success, not a conflict — this is what makes it so.
+  @@unique([userId, clientSessionId])
+  /// A genuine double-tap, or two devices claiming the same instant. This one IS a conflict.
+  @@unique([userId, startedAt])
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([userId, taskId])
+  @@map("focus_sessions")
+}
+
+/// Progression totals. A PROJECTION, not a source of truth (ADR-006).
+///
+/// Every column here is derivable by replaying `focus_sessions` in order, which is what the
+/// `gamification:rebuild` command does. If this row is ever wrong, it is rebuilt rather than
+/// patched — and the fact that it CAN be rebuilt is what allows it to be updated in the same
+/// transaction as the insert without that being a durability risk.
+model UserGamification {
+  userId String @id @map("user_id") @db.Uuid
+
+  /// Equal to `lifetimePoints` for as long as no rule subtracts. Kept separate so a spending sink
+  /// can arrive without a migration; the UI renders lifetime.
+  balance        Int @default(0)
+  lifetimePoints Int @default(0) @map("lifetime_points")
+
+  /// Consecutive calendar days with a completed focus session — the streak the UI displays.
+  currentDayStreak Int @default(0) @map("current_day_streak")
+  longestDayStreak Int @default(0) @map("longest_day_streak")
+
+  /// Consecutive completed focus sessions. Internal to the economy: it fires the +50 every third
+  /// session and resets on a termination. Never displayed as "your streak".
+  currentSessionRun Int @default(0) @map("current_session_run") @db.SmallInt
+
+  /// The user-local date of the last completed focus session. Drives lazy streak resolution, so no
+  /// scheduled job is needed to expire a streak.
+  lastActiveDate DateTime? @map("last_active_date") @db.Date
+
+  /// Ships with a value that nothing reads yet, so the freeze feature is later pure logic.
+  streakFreezesAvailable Int       @default(1) @map("streak_freezes_available") @db.SmallInt
+  lastFreezeGrantedOn    DateTime? @map("last_freeze_granted_on") @db.Date
+
+  unlockedTitles String[] @default([]) @map("unlocked_titles")
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_gamification")
 }

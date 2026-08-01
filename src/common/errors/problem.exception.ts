@@ -70,6 +70,22 @@ export function notFoundProblem(detail: string): ProblemException {
   });
 }
 
+/**
+ * Two records claiming the same instant — a double-tap, or two devices both insisting they ran a
+ * block at 09:14:02.
+ *
+ * Deliberately NOT the response to a repeated `clientSessionId`: that is the outbox retrying, and
+ * it resolves to the original record with a 200. Returning 409 there would make a client treat its
+ * own successful retry as a failure and, worse, teach it to stop retrying.
+ */
+export function sessionConflictProblem(detail: string): ProblemException {
+  return new ProblemException({
+    status: HttpStatus.CONFLICT,
+    title: 'Session conflict',
+    detail,
+  });
+}
+
 /** No usable access token: absent, malformed, expired or foreign — all indistinguishable. */
 export function notAuthenticatedProblem(): ProblemException {
   return new ProblemException({
