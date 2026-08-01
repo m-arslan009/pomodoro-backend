@@ -337,3 +337,37 @@ Ensure all required backend components such as database models, migrations/schem
 `Title`: Verify existing Settings backend coverage before creating any tests
 
 `User prompt`: Verify whether test cases for the backend Settings feature have already been created. First, inspect the existing backend test suite and identify any tests that cover the Settings feature. If such tests exist, do not create new ones; instead, provide a concise summary of each test case, including the functionality it validates (e.g., GET settings, PATCH settings, validation, authentication/authorization, persistence, error handling, etc.), along with any important gaps or missing coverage. If no Settings feature tests exist, create a comprehensive test suite following the project's existing testing patterns and standards, covering all backend functionality, success and failure scenarios, validation, authorization. Before creating any tests, ensure they do not duplicate existing coverage, and implement only the missing test cases required for complete coverage.
+
+## Timer phase — T0 feature planning
+
+`Title`: Design the Timer's backend surface as part of one authoritative cross-project plan
+
+`User prompt`: Where backend support is required, design or refine the necessary API endpoints, request/response contracts, validation rules, authentication requirements, and data models, ensuring they align with the overall project architecture. Verify that the frontend and backend can be fully synchronized using this plan, eliminate any contract mismatches, and define the source of truth for timer state, synchronization, persistence, recovery, and conflict resolution. The final output should serve as the implementation blueprint that both frontend and backend will follow, ensuring feature parity, consistency, scalability, and long-term maintainability before any implementation begins.
+
+## Timer phase — T0 backend scope narrowed to Timer's core responsibilities
+
+`User prompt`: The backend should only support the Timer's core responsibilities (such as persistence, synchronization, recovery, and user-specific state), while History should derive its information from Timer-generated session records rather than communicating with the backend directly. If backend changes or new endpoints are required to support this architecture, design them with the goal of keeping History completely backend-agnostic.
+
+## Timer phase — T2 scope expanded to Task CRUD
+
+`Title`: Design the task management endpoints and model changes CRUD requires
+
+`User prompt`: Update the approved Timer feature implementation plan to incorporate Task CRUD operations. If the current plan requires architectural, data model, API contract, or synchronization changes to support task management, update the plan accordingly while preserving the previously approved design decisions. The result should clearly define frontend responsibilities, backend responsibilities, data flow, and any required endpoints or model changes before implementation begins.
+
+## Timer phase — T2/T3 backend implementation
+
+`Title`: Build the Timer backend as the source of truth for persisted sessions
+
+`User prompt`: Implement the backend for the Timer feature according to the approved architecture and implementation plan, treating the backend as the source of truth for persisted timer sessions, not for real-time timer execution. Before implementation, analyze the existing backend to identify any Timer-related code and refactor or reuse it where appropriate instead of creating duplicate implementations. Design the backend so that it handles only meaningful persistence and business logic, including completed sessions, terminated sessions (with termination reason when applicable), active session recovery if required, cross-device synchronization where beneficial, task-session association, session validation, analytics-ready data, and any other persistence required by the approved architecture. Implement the necessary database models, migrations, repositories, services, DTOs, controllers, validation, authentication/authorization, and API endpoints to support this design. Ensure every completed or terminated session produces a canonical session record that becomes the single source of truth for History and Analytics, allowing those features to derive their data without requiring additional History-specific backend logic. Where architectural decisions are not explicitly defined in the approved plan, choose the approach that minimizes network traffic, reduces backend complexity, improves scalability, and preserves a responsive user experience. Remove obsolete or incomplete implementations, avoid duplicate business logic, and update shared API contracts and models so the frontend and backend remain fully synchronized. Do not create or run any test cases unless explicitly requested by the user.
+
+## Timer phase — T5 backend coverage
+
+`Title`: Create the backend test suite for the Timer feature
+
+`User prompt`: Create a comprehensive backend test suite for the Timer feature based on the approved architecture, API contract, and final implementation.
+
+## Test execution policy
+
+`Title`: Tests are never run by the agent; the pre-push hook owns execution
+
+`User prompt`: You are not supposed to run test cases. It will be handled when pushing the code. I have already configured pre-push testing. Just write test cases as per the rules and skills.
