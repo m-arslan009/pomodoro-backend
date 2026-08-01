@@ -371,3 +371,9 @@ Ensure all required backend components such as database models, migrations/schem
 `Title`: Tests are never run by the agent; the pre-push hook owns execution
 
 `User prompt`: You are not supposed to run test cases. It will be handled when pushing the code. I have already configured pre-push testing. Just write test cases as per the rules and skills.
+
+## History phase — backend verification
+
+`Title`: Verify whether History requires any backend work
+
+`User prompt`: Inspect the backend implementation to determine whether the History feature requires any backend changes based on the approved architecture, implementation plan, and updated CONTRACT.md. Do not assume additional backend work is needed. Instead, verify whether the existing Timer backend already provides all the data and APIs required by the History feature. Since the approved design states that History is primarily a frontend concern that derives its data from persisted Timer sessions, confirm that the backend already exposes sufficient session data, filtering, pagination, sorting, and related metadata for the frontend to function correctly. If the backend fully satisfies the approved design, do not introduce new History-specific business logic, services, models, or endpoints; confirm that no backend implementation is required and document the verification results. If any gaps are discovered that prevent the frontend from implementing the approved History functionality, implement only the minimal backend changes necessary to support the approved architecture. Do not duplicate Timer business logic or create a separate persistence layer for History. Any backend updates must keep Timer as the single source of truth for session data with History as a read-only consumer, reusing existing repositories, services, DTOs, controllers, and database models. If changes are made, update the API contract accordingly.
