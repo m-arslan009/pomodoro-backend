@@ -70,6 +70,22 @@ export class AvatarService {
     return toUserProfile(user);
   }
 
+  /**
+   * Deletes the photo and falls the account back to its initials.
+   *
+   * Idempotent: an account with no avatar is already in the requested state, so this succeeds and
+   * returns the unchanged profile rather than reporting a 404 the caller could do nothing about.
+   */
+  async remove(userId: string): Promise<UserProfile> {
+    const cleared = await this.avatars.remove(userId);
+    if (!cleared) throw notAuthenticatedProblem();
+
+    const user = await this.users.findById(userId);
+    if (!user) throw notAuthenticatedProblem();
+
+    return toUserProfile(user);
+  }
+
   async read(userId: string): Promise<AvatarRecord> {
     const avatar = await this.avatars.findByUserId(userId);
     if (!avatar) throw notFoundProblem('This account has no profile photo.');

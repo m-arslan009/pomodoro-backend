@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Patch,
@@ -95,5 +96,15 @@ export class UserController {
     response.setHeader('ETag', etag);
     response.setHeader('Content-Disposition', 'inline');
     response.type(avatar.contentType).send(Buffer.from(avatar.data));
+  }
+
+  /**
+   * Removes the photo. Answers 200 with the updated profile rather than 204, so the client can
+   * re-render from the response instead of making a second round trip for it (CONTRACT.md §4.5).
+   */
+  @Delete('avatar')
+  @Throttle({ default: AVATAR_THROTTLE })
+  async removeAvatar(@CurrentAuth() auth: AuthContext): Promise<{ user: UserProfile }> {
+    return { user: await this.avatars.remove(auth.userId) };
   }
 }

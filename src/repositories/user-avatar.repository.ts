@@ -65,4 +65,25 @@ export class UserAvatarRepository {
       throw error;
     }
   }
+
+  /**
+   * Clears the image and its marker together, for the same reason `replace` writes them together.
+   *
+   * `deleteMany` rather than `delete` because removing an avatar that is not there is a success,
+   * not a missing-record error (CONTRACT.md §4.5) — it matches zero rows and reports it.
+   *
+   * @returns false when the account no longer exists.
+   */
+  async remove(userId: string): Promise<boolean> {
+    try {
+      await this.prisma.$transaction([
+        this.prisma.user.update({ where: { id: userId }, data: { avatarUpdatedAt: null } }),
+        this.prisma.userAvatar.deleteMany({ where: { userId } }),
+      ]);
+      return true;
+    } catch (error) {
+      if (isMissingRecord(error)) return false;
+      throw error;
+    }
+  }
 }
