@@ -22,6 +22,13 @@ export class GamificationController {
 
   @Get()
   async read(@CurrentAuth() auth: AuthContext): Promise<{ gamification: GamificationSnapshot }> {
-    return { gamification: await this.gamification.getGamification(auth.userId) };
+    return {
+      gamification: await this.gamification.getGamification(
+        auth.userId,
+        // Elapsed days are resolved against the user's own calendar, and the token already carries
+        // the account's zone — so "has a day been missed?" needs no second query to answer.
+        auth.profile.timezone,
+      ),
+    };
   }
 }

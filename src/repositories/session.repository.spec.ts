@@ -57,6 +57,7 @@ function makeGamificationRow(overrides: Record<string, unknown> = {}) {
     currentSessionRun: 1,
     lastActiveDate: new Date('2026-01-15T00:00:00.000Z'),
     streakFreezesAvailable: 1,
+    lastFreezeGrantedOn: null,
     unlockedTitles: ['anchor'],
     ...overrides,
   };
@@ -86,6 +87,7 @@ const advance = (state: GamificationState): AppliedSession => ({
   state: { ...state, balance: state.balance + 100, lifetimePoints: state.lifetimePoints + 100 },
   pointsAwarded: 100,
   newlyUnlocked: ['anchor'],
+  freezesSpent: 0,
 });
 
 /** Prisma's unique-constraint violation, carrying the offending constraint name in `meta`. */
@@ -336,6 +338,7 @@ describe('SessionRepository', () => {
         currentSessionRun: 1,
         lastActiveDate: '2026-01-15',
         streakFreezesAvailable: 1,
+        lastFreezeGrantedOn: null,
         unlockedTitles: ['anchor'],
       });
     });
@@ -346,6 +349,18 @@ describe('SessionRepository', () => {
       const state = await repository.getGamification('user-1');
 
       expect(state.lastActiveDate).toBeNull();
+    });
+
+    it('narrows the freeze grant marker to a calendar key too', async () => {
+      // The fold compares it as a string against an attribution date, so it has to arrive in the
+      // same form as the other date column and not as a Date at UTC midnight.
+      gamificationRow = makeGamificationRow({
+        lastFreezeGrantedOn: new Date('2026-01-14T00:00:00.000Z'),
+      });
+
+      const state = await repository.getGamification('user-1');
+
+      expect(state.lastFreezeGrantedOn).toBe('2026-01-14');
     });
   });
 
@@ -432,9 +447,42 @@ describe('SessionRepository', () => {
         state: { ...state, lastActiveDate: '2026-01-16' },
         pointsAwarded: 100,
         newlyUnlocked: [],
+        freezesSpent: 0,
       }));
 
       expect(updateArgs[0].data.lastActiveDate).toEqual(new Date('2026-01-16T00:00:00.000Z'));
+    });
+
+    it('writes back the freeze count and the grant marker the fold produced', async () => {
+      /*
+       * The fold derives both now (CONTRACT.md §14.6). Leaving them out of this write — as it did
+       * while the feature was display-only — would let a spend be announced in the response and
+       * then silently refunded on the very next read.
+       */
+      gamificationRow = makeGamificationRow();
+
+      await repository.record(input(), (state) => ({
+        state: { ...state, streakFreezesAvailable: 0, lastFreezeGrantedOn: '2026-01-15' },
+        pointsAwarded: 100,
+        newlyUnlocked: [],
+        freezesSpent: 1,
+      }));
+
+      expect(updateArgs[0].data).toMatchObject({
+        streakFreezesAvailable: 0,
+        lastFreezeGrantedOn: new Date('2026-01-15T00:00:00.000Z'),
+      });
+    });
+
+    it('reports the spend the fold made, so the response can announce it', async () => {
+      // Transient, like `newlyUnlocked`: it describes what THIS request did, and the stored count
+      // alone cannot answer it.
+      const result = await repository.record(input(), (state) => ({
+        ...advance(state),
+        freezesSpent: 1,
+      }));
+
+      expect(result).toMatchObject({ kind: 'created', freezesSpent: 1 });
     });
   });
 
@@ -670,13 +718,31 @@ describe('SessionRepository', () => {
       expect(upsertArgs[0].create).toMatchObject({ userId: 'user-1', lifetimePoints: 100 });
     });
 
-    it('does not reset the streak freezes it did not derive', async () => {
-      // They are granted out of band, so an update that rewrote them would quietly confiscate one.
+    it('rewrites the streak freezes, because it now derives them', async () => {
+      /*
+       * REVERSED with the freeze logic (CONTRACT.md §14.6). While freezes were granted out of band
+       * this update deliberately skipped them, since rewriting a count it had not computed would
+       * have quietly confiscated one. The fold now derives every spend and every grant from the
+       * event stream, so skipping them would do the opposite damage: leave a count contradicting
+       * the streak the rebuild just replayed, which is the exact drift ADR-006 exists to remove.
+       */
       rows = [makeRow()];
 
-      await repository.rebuild('user-1', fold);
+      await repository.rebuild('user-1', (state) => ({
+        ...fold(state),
+        streakFreezesAvailable: 0,
+        lastFreezeGrantedOn: '2026-01-22',
+      }));
 
-      expect(upsertArgs[0].update).not.toHaveProperty('streakFreezesAvailable');
+      // Both branches of the upsert, because an account whose row was lost entirely is exactly the
+      // case a rebuild exists to fix — and it must come back with the count its own log implies.
+      const written = {
+        streakFreezesAvailable: 0,
+        lastFreezeGrantedOn: new Date('2026-01-22T00:00:00.000Z'),
+      };
+
+      expect(upsertArgs[0].update).toMatchObject(written);
+      expect(upsertArgs[0].create).toMatchObject(written);
     });
   });
 

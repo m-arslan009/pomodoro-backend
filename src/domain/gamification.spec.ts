@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   POINTS,
+  STREAK_FREEZE,
   TITLES,
   type GamificationState,
   type ScorableSession,
@@ -9,6 +10,7 @@ import {
   emptyGamification,
   localDateKey,
   nextDateKey,
+  resolveElapsedDays,
   titlesFor,
 } from './gamification';
 
@@ -56,6 +58,7 @@ describe('emptyGamification', () => {
       currentSessionRun: 0,
       lastActiveDate: null,
       streakFreezesAvailable: 1,
+      lastFreezeGrantedOn: null,
       unlockedTitles: [],
     });
   });
@@ -183,6 +186,95 @@ describe('attributionDate', () => {
     expect(attributionDate(startedAt, new Date('2026-01-20T20:00:00.000Z'), 'Asia/Karachi')).toBe(
       '2026-01-21',
     );
+  });
+});
+
+describe('resolveElapsedDays', () => {
+  /*
+   * The lazy streak resolution of ADR-014, and the reason there is no nightly job at all.
+   *
+   * It is PURE IN `today` — it reads no clock of its own — which is what lets one rule serve two
+   * callers that must never disagree: the write fold passes the day a completion counts toward, and
+   * `GET /gamification` passes the user-local date now. Only the first of those is persisted
+   * (CONTRACT.md §14.6), so everything asserted here has to hold for a day chosen either way.
+   */
+
+  const active: GamificationState = {
+    ...emptyGamification(),
+    currentDayStreak: 3,
+    longestDayStreak: 3,
+    lastActiveDate: '2026-01-15',
+  };
+
+  it('leaves a day that is still in progress alone', () => {
+    // A streak is broken by a day that ENDED empty, not by one the user still has in front of them.
+    // A clock that skews backwards lands here too, harmlessly.
+    expect(resolveElapsedDays(active, '2026-01-15')).toBe(active);
+    expect(resolveElapsedDays(active, '2026-01-16')).toBe(active);
+  });
+
+  it('spends a freeze to cover exactly one missed day', () => {
+    const resolved = resolveElapsedDays(active, '2026-01-17');
+
+    expect(resolved.currentDayStreak).toBe(3);
+    expect(resolved.streakFreezesAvailable).toBe(0);
+  });
+
+  it('advances the marker onto the covered day rather than onto today', () => {
+    /*
+     * THE MARKER MOVE IS THE WHOLE MECHANISM. It is what makes the same gap impossible to pay for
+     * twice, and why no second column is needed to remember that a day was bought. Moving it to
+     * `today` instead would credit the user with activity on a day they did nothing.
+     */
+    expect(resolveElapsedDays(active, '2026-01-17').lastActiveDate).toBe('2026-01-16');
+  });
+
+  it('cannot be charged twice for the same gap', () => {
+    /*
+     * Resolution runs on every read as well as every write, so a second pass over one gap is the
+     * NORMAL case, not an edge case — a user who opens the app twice must not be billed twice. The
+     * fixture banks two so there is genuinely something left to take.
+     */
+    const banked: GamificationState = { ...active, streakFreezesAvailable: 2 };
+    const once = resolveElapsedDays(banked, '2026-01-17');
+
+    expect(once.streakFreezesAvailable).toBe(1);
+    expect(resolveElapsedDays(once, '2026-01-17')).toEqual(once);
+  });
+
+  it('refuses to spend on a gap it cannot close', () => {
+    // Two missed days is a broken streak whatever is banked. A freeze is insurance against the day
+    // life got in the way, not a way to be absent for a week and keep the number.
+    const resolved = resolveElapsedDays({ ...active, streakFreezesAvailable: 2 }, '2026-01-18');
+
+    expect(resolved.currentDayStreak).toBe(0);
+    expect(resolved.streakFreezesAvailable).toBe(2);
+  });
+
+  it('breaks a streak there is nothing banked to save', () => {
+    const resolved = resolveElapsedDays({ ...active, streakFreezesAvailable: 0 }, '2026-01-17');
+
+    expect(resolved.currentDayStreak).toBe(0);
+  });
+
+  it('leaves the marker where it was when the streak breaks', () => {
+    // It records the last day actually worked. Moving it forward would invent activity.
+    expect(resolveElapsedDays(active, '2026-01-25').lastActiveDate).toBe('2026-01-15');
+  });
+
+  it('takes nothing from an account that never started', () => {
+    // No freeze is ever spent protecting a streak that does not exist.
+    const fresh = emptyGamification();
+
+    expect(resolveElapsedDays(fresh, '2026-03-01')).toBe(fresh);
+  });
+
+  it('takes nothing from a streak that has already lapsed', () => {
+    // Otherwise every subsequent read would drain the bank a day at a time for a streak that is
+    // already gone.
+    const lapsed: GamificationState = { ...active, currentDayStreak: 0 };
+
+    expect(resolveElapsedDays(lapsed, '2026-01-25')).toBe(lapsed);
   });
 });
 
@@ -386,14 +478,23 @@ describe('applySession', () => {
       expect(state.currentDayStreak).toBe(2);
     });
 
-    it('restarts after a missed day but remembers the best run', () => {
-      const state = fold([
-        completedFocus('2026-01-15'),
-        completedFocus('2026-01-16'),
-        completedFocus('2026-01-17'),
-        // 18th missed.
-        completedFocus('2026-01-19'),
-      ]);
+    it('restarts after a missed day it cannot cover, but remembers the best run', () => {
+      /*
+       * Nothing banked, so the 18th genuinely ends the run. A new account starts with one freeze in
+       * hand, and with it this same log keeps the streak alive — which is the freeze block's
+       * business, not this one's.
+       */
+      const drained: GamificationState = { ...emptyGamification(), streakFreezesAvailable: 0 };
+      const state = fold(
+        [
+          completedFocus('2026-01-15'),
+          completedFocus('2026-01-16'),
+          completedFocus('2026-01-17'),
+          // 18th missed.
+          completedFocus('2026-01-19'),
+        ],
+        drained,
+      );
 
       expect(state).toMatchObject({
         currentDayStreak: 1,
@@ -406,8 +507,12 @@ describe('applySession', () => {
       /*
        * THE POINT OF THE WHOLE ATTRIBUTION RULE. Someone who missed the 18th cannot flush a stale
        * record dated to it and have the streak rejoined. The record is stored, it just buys nothing.
+       *
+       * Drained on purpose: the streak has to be genuinely broken for the rule to be under test at
+       * all, and a banked freeze would have covered the 18th before the stale record ever arrived.
        */
-      const broken = fold([completedFocus('2026-01-17'), completedFocus('2026-01-19')]);
+      const drained: GamificationState = { ...emptyGamification(), streakFreezesAvailable: 0 };
+      const broken = fold([completedFocus('2026-01-17'), completedFocus('2026-01-19')], drained);
       const after = applySession(broken, completedFocus('2026-01-18')).state;
 
       expect(after.currentDayStreak).toBe(1);
@@ -428,6 +533,128 @@ describe('applySession', () => {
       const after = applySession(broken, completedFocus('2026-01-10')).state;
 
       expect(after.lastActiveDate).toBe('2026-01-19');
+    });
+  });
+
+  describe('streak freezes', () => {
+    /*
+     * A freeze buys back ONE missed day of `currentDayStreak`, and has no bearing on
+     * `currentSessionRun` — that one counts sessions rather than days and resets on a termination.
+     *
+     * Spending happens inside the fold rather than on a clock, which is what keeps it replayable:
+     * the day passed to `resolveElapsedDays` here is the session's stored attribution date, so a
+     * rebuild reaches the same answer however long afterwards it runs.
+     */
+
+    it('covers a missed day and reports the spend, so it is announced exactly once', () => {
+      // `freezesSpent` is to a saved day what `newlyUnlocked` is to a title: the transient signal
+      // that lets the client say it happened, once, without computing anything itself.
+      const before = fold([completedFocus('2026-01-15')]);
+      const result = applySession(before, completedFocus('2026-01-17'));
+
+      expect(result.freezesSpent).toBe(1);
+      expect(result.state.currentDayStreak).toBe(2);
+      expect(result.state.streakFreezesAvailable).toBe(0);
+    });
+
+    it('reports the spend even when the same session earns one straight back', () => {
+      /*
+       * THE CASE THE COUNT ALONE CANNOT ANSWER, and the entire reason `freezesSpent` exists.
+       * Covering a missed day and then reaching a multiple of seven moves `streakFreezesAvailable`
+       * by nothing at all, so a client watching only the count would report a saved day as unsaved.
+       */
+      const sixDays: GamificationState = {
+        ...emptyGamification(),
+        currentDayStreak: 6,
+        longestDayStreak: 6,
+        lastActiveDate: '2026-01-20',
+        streakFreezesAvailable: 1,
+      };
+
+      // The 21st missed; this completion covers it and takes the streak to seven.
+      const result = applySession(sixDays, completedFocus('2026-01-22'));
+
+      expect(result.state.currentDayStreak).toBe(7);
+      expect(result.state.streakFreezesAvailable).toBe(1);
+      expect(result.freezesSpent).toBe(1);
+    });
+
+    it('spends nothing on a gap wider than a freeze covers', () => {
+      // The streak restarts at one and the freeze is still in hand — it was never spent on a gap it
+      // could not close.
+      const before = fold([completedFocus('2026-01-15')]);
+      const result = applySession(before, completedFocus('2026-01-18'));
+
+      expect(result.freezesSpent).toBe(0);
+      expect(result.state.currentDayStreak).toBe(1);
+      expect(result.state.streakFreezesAvailable).toBe(1);
+    });
+
+    it('banks one when the day streak reaches a multiple of seven', () => {
+      const drained: GamificationState = { ...emptyGamification(), streakFreezesAvailable: 0 };
+      const week = fold(
+        Array.from({ length: 7 }, (_, index) => completedFocus(`2026-01-${15 + index}`)),
+        drained,
+      );
+
+      expect(week.currentDayStreak).toBe(7);
+      expect(week.streakFreezesAvailable).toBe(1);
+    });
+
+    it('banks one a day at most, however many blocks that day holds', () => {
+      // Without the per-day guard every later block on the seventh day would bank another one, and
+      // a heavy afternoon would fill the account to the ceiling.
+      const drained: GamificationState = { ...emptyGamification(), streakFreezesAvailable: 0 };
+      const week = fold(
+        Array.from({ length: 7 }, (_, index) => completedFocus(`2026-01-${15 + index}`)),
+        drained,
+      );
+      const sameDayAgain = fold([completedFocus('2026-01-21'), completedFocus('2026-01-21')], week);
+
+      expect(sameDayAgain.streakFreezesAvailable).toBe(1);
+    });
+
+    it('stops banking at the ceiling, so freezes cannot be hoarded into a long absence', () => {
+      // Fourteen consecutive days passes two grant points, and the account starts with one in hand.
+      const fortnight = fold(
+        Array.from({ length: 14 }, (_, index) => completedFocus(`2026-01-${15 + index}`)),
+      );
+
+      expect(fortnight.currentDayStreak).toBe(14);
+      expect(fortnight.streakFreezesAvailable).toBe(STREAK_FREEZE.maxAvailable);
+    });
+
+    it('never spends one on a terminated block', () => {
+      /*
+       * Terminating costs nothing, and paying a freeze for an honest early stop would be a cost.
+       * Only a completion can extend the streak a freeze exists to protect, so only a completion
+       * resolves the days behind it — the days here are left entirely unexamined.
+       */
+      const before = fold([completedFocus('2026-01-15')]);
+      const result = applySession(before, terminatedFocus('2026-01-20'));
+
+      expect(result.freezesSpent).toBe(0);
+      expect(result.state.streakFreezesAvailable).toBe(1);
+      expect(result.state.currentDayStreak).toBe(1);
+      expect(result.state.lastActiveDate).toBe('2026-01-15');
+    });
+
+    it('refuses to let a backdated record spend or earn one', () => {
+      /*
+       * ADR-011 carried through to freezes. A record attributed to a day at or before the marker is
+       * stored and paid for like any other, but it cannot advance the streak, spend a freeze, or
+       * bank one — otherwise a stale outbox flush would be a way to buy back a day already lost.
+       */
+      const broken = fold([completedFocus('2026-01-15'), completedFocus('2026-01-19')]);
+      const result = applySession(broken, completedFocus('2026-01-18'));
+
+      expect(result.freezesSpent).toBe(0);
+      expect(result.state.streakFreezesAvailable).toBe(1);
+      expect(result.state.lastActiveDate).toBe('2026-01-19');
+      // Still paid, and still counted toward the session run — third in a row, so the bonus lands.
+      // What backdating buys is nothing at all in the CALENDAR; the work itself is worth what any
+      // block is worth.
+      expect(result.pointsAwarded).toBe(150);
     });
   });
 });
@@ -483,12 +710,51 @@ describe('replay equivalence (ADR-006)', () => {
        */
       balance: 650,
       lifetimePoints: 650,
-      // 15th, 16th, then the 18th — the 17th was missed, so the current streak restarts at 1.
-      currentDayStreak: 1,
-      longestDayStreak: 2,
+      /*
+       * 15th, 16th, then the 18th. The 17th was missed, and the account's starting freeze covers
+       * it — so the streak reaches 3 rather than restarting, and the bank is empty afterwards. The
+       * marker is the 18th because the covering session earned that day outright.
+       */
+      currentDayStreak: 3,
+      longestDayStreak: 3,
       currentSessionRun: 4,
       lastActiveDate: '2026-01-18',
+      streakFreezesAvailable: 0,
+      lastFreezeGrantedOn: null,
+      unlockedTitles: [],
+    });
+  });
+
+  it('replays every spend and every grant, because both are functions of the log', () => {
+    /*
+     * The freeze economy is the newest thing that could quietly break rebuildability, and the reason
+     * `resolveElapsedDays` takes the day as an argument instead of reading a clock. On this path
+     * that argument is the session's stored attribution date, so the fold spends and banks at
+     * exactly the same points however long after the fact it is replayed.
+     */
+    const log: readonly ScorableSession[] = [
+      completedFocus('2026-01-15'),
+      // The 16th missed, and covered out of the bank rather than breaking the streak.
+      completedFocus('2026-01-17'),
+      completedFocus('2026-01-18'),
+      completedFocus('2026-01-19'),
+      completedFocus('2026-01-20'),
+      completedFocus('2026-01-21'),
+      // Seventh day of the streak: one banked back.
+      completedFocus('2026-01-22'),
+    ];
+
+    expect(fold(log)).toEqual({
+      // Seven completions, the bonus landing on the third and the sixth: 100 × 7 + 50 × 2.
+      balance: 800,
+      lifetimePoints: 800,
+      currentDayStreak: 7,
+      longestDayStreak: 7,
+      currentSessionRun: 7,
+      lastActiveDate: '2026-01-22',
+      // Started with one, spent it on the 16th, earned it back on the seventh day.
       streakFreezesAvailable: 1,
+      lastFreezeGrantedOn: '2026-01-22',
       unlockedTitles: [],
     });
   });

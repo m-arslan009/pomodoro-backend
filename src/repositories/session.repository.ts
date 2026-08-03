@@ -47,6 +47,8 @@ export type RecordOutcome =
       readonly state: GamificationState;
       readonly pointsAwarded: number;
       readonly newlyUnlocked: readonly string[];
+      /** Freezes this record spent covering a missed day, so the response announces it once. */
+      readonly freezesSpent: number;
     }
   /** This exact record was already stored. A retried outbox flush is success, not an error. */
   | {
@@ -176,6 +178,7 @@ export class SessionRepository {
       currentSessionRun: row.currentSessionRun,
       lastActiveDate: toDateKey(row.lastActiveDate),
       streakFreezesAvailable: row.streakFreezesAvailable,
+      lastFreezeGrantedOn: toDateKey(row.lastFreezeGrantedOn),
       unlockedTitles: row.unlockedTitles,
     };
   }
@@ -273,6 +276,14 @@ export class SessionRepository {
             longestDayStreak: applied.state.longestDayStreak,
             currentSessionRun: applied.state.currentSessionRun,
             lastActiveDate: fromDateKey(applied.state.lastActiveDate),
+            /*
+             * The fold derives these now (CONTRACT.md §14.6): a completion may spend a freeze to
+             * cover a missed day and may earn one back by reaching a multiple of seven. Leaving
+             * them out — as this write did while the feature was display-only — would let a spend
+             * be announced in the response and then silently refunded on the next read.
+             */
+            streakFreezesAvailable: applied.state.streakFreezesAvailable,
+            lastFreezeGrantedOn: fromDateKey(applied.state.lastFreezeGrantedOn),
             unlockedTitles: [...applied.state.unlockedTitles],
           },
         });
@@ -283,6 +294,7 @@ export class SessionRepository {
           state: applied.state,
           pointsAwarded: applied.pointsAwarded,
           newlyUnlocked: applied.newlyUnlocked,
+          freezesSpent: applied.freezesSpent,
         } as const;
       });
     } catch (error) {
@@ -371,8 +383,16 @@ export class SessionRepository {
         currentSessionRun: state.currentSessionRun,
         lastActiveDate: fromDateKey(state.lastActiveDate),
         streakFreezesAvailable: state.streakFreezesAvailable,
+        lastFreezeGrantedOn: fromDateKey(state.lastFreezeGrantedOn),
         unlockedTitles: [...state.unlockedTitles],
       },
+      /*
+       * The update writes the freeze fields too, REVERSING the rule that held while the feature was
+       * display-only. Back then the count was granted out of band, so rewriting it here would have
+       * confiscated one; now the fold derives every spend and every grant from the event stream, so
+       * a rebuild that skipped them would leave a count contradicting the streak it just replayed —
+       * which is precisely the drift ADR-006 says a rebuild exists to remove.
+       */
       update: {
         balance: state.balance,
         lifetimePoints: state.lifetimePoints,
@@ -380,6 +400,8 @@ export class SessionRepository {
         longestDayStreak: state.longestDayStreak,
         currentSessionRun: state.currentSessionRun,
         lastActiveDate: fromDateKey(state.lastActiveDate),
+        streakFreezesAvailable: state.streakFreezesAvailable,
+        lastFreezeGrantedOn: fromDateKey(state.lastFreezeGrantedOn),
         unlockedTitles: [...state.unlockedTitles],
       },
     });
@@ -413,6 +435,7 @@ export class SessionRepository {
       currentSessionRun: row.currentSessionRun,
       lastActiveDate: toDateKey(row.lastActiveDate),
       streakFreezesAvailable: row.streakFreezesAvailable,
+      lastFreezeGrantedOn: toDateKey(row.lastFreezeGrantedOn),
       unlockedTitles: row.unlockedTitles,
     };
   }

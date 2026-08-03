@@ -377,3 +377,27 @@ Ensure all required backend components such as database models, migrations/schem
 `Title`: Verify whether History requires any backend work
 
 `User prompt`: Inspect the backend implementation to determine whether the History feature requires any backend changes based on the approved architecture, implementation plan, and updated CONTRACT.md. Do not assume additional backend work is needed. Instead, verify whether the existing Timer backend already provides all the data and APIs required by the History feature. Since the approved design states that History is primarily a frontend concern that derives its data from persisted Timer sessions, confirm that the backend already exposes sufficient session data, filtering, pagination, sorting, and related metadata for the frontend to function correctly. If the backend fully satisfies the approved design, do not introduce new History-specific business logic, services, models, or endpoints; confirm that no backend implementation is required and document the verification results. If any gaps are discovered that prevent the frontend from implementing the approved History functionality, implement only the minimal backend changes necessary to support the approved architecture. Do not duplicate Timer business logic or create a separate persistence layer for History. Any backend updates must keep Timer as the single source of truth for session data with History as a read-only consumer, reusing existing repositories, services, DTOs, controllers, and database models. If changes are made, update the API contract accordingly.
+
+## Avatar removal — DELETE /me/avatar
+
+`Title`: Remove the avatar through the correct API, handling no existing avatar and failures
+
+`User prompt`: implement avatar removal feature by using existing avatart and profile architecture. … on confirm, remove the avatar by calling the correct API. handle all states such as success, loading, error, no existing avatar. … on error keep the avatar untouch. there is new file you can also refer about this feature which is Implementation_gap_report.md
+
+## Streak Freeze — backend
+
+`Title`: Implement the Streak Freeze backend on the existing gamification and lazy day-streak resolution architecture
+
+`User prompt`: Now implement backend of Streak Freeze feature, using existing gamification and lazy
+day-streak resolution architecture. Use the existing gamification fields already present in the
+schema. Do not introduce duplicate freeze state unless the existing model is insufficient for a
+required behavior.
+
+## Streak Freeze — backend test coverage
+
+`Title`: Cover the Streak Freeze streak rules with high-value tests derived from the contract
+
+`User prompt`: Create backend tests for the implemented Streak Freeze feature. Focus only on high-value
+tests that verify the core streak rules. Do not attempt to cover every internal branch or
+implementation detail. Derive expected behavior from CONTRACT.md and the existing gamification
+rules. Test observable domain and persistence behavior, not private methods.

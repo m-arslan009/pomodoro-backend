@@ -116,6 +116,7 @@ describe('SessionService', () => {
       state: result.state,
       pointsAwarded: result.pointsAwarded,
       newlyUnlocked: result.newlyUnlocked,
+      freezesSpent: result.freezesSpent,
     });
 
     sessions = {
@@ -204,6 +205,36 @@ describe('SessionService', () => {
       const result = await service.recordSession('user-1', 'UTC', dto());
 
       expect(result.gamification.newlyUnlocked).toEqual(['anchor']);
+    });
+
+    it('announces a missed day covered by this session', async () => {
+      /*
+       * The one request that may report a spend, because it is the one that writes it down
+       * (CONTRACT.md §14.6). The read path re-derives the same pending spend on every poll and
+       * therefore announces nothing.
+       */
+      startingState = {
+        ...emptyGamification(),
+        currentDayStreak: 3,
+        longestDayStreak: 3,
+        // The 14th missed; this session is attributed to the 15th and covers it.
+        lastActiveDate: '2026-01-13',
+        streakFreezesAvailable: 1,
+      };
+
+      const result = await service.recordSession('user-1', 'UTC', dto());
+
+      expect(result.gamification.streakFreezesSpent).toBe(1);
+      expect(result.gamification.currentDayStreak).toBe(4);
+      expect(result.gamification.streakFreezesAvailable).toBe(0);
+    });
+
+    it('reports no spend on an ordinary session', async () => {
+      // The field is on every response, so it has to be quiet by default — a client watching it
+      // must not celebrate a saved day on a day nothing was saved.
+      const result = await service.recordSession('user-1', 'UTC', dto());
+
+      expect(result.gamification.streakFreezesSpent).toBe(0);
     });
   });
 
@@ -470,10 +501,11 @@ describe('SessionService', () => {
 
       expect(result.replayed).toBe(true);
       expect(result.session.clientSessionId).toBe(CLIENT_SESSION_ID);
-      // Zero delta and no announcement: a retry must not re-report points the user already saw or
-      // re-fire a title celebration.
+      // Zero delta and no announcement: a retry must not re-report points the user already saw,
+      // re-fire a title celebration, or claim a second time to have saved the same day.
       expect(result.gamification.pointsDelta).toBe(0);
       expect(result.gamification.newlyUnlocked).toEqual([]);
+      expect(result.gamification.streakFreezesSpent).toBe(0);
     });
 
     it('reports an overlap as a validation failure on startedAt, not a conflict', async () => {

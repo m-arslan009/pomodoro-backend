@@ -39,6 +39,7 @@ const STATE: GamificationState = {
   currentSessionRun: 2,
   lastActiveDate: '2026-01-15',
   streakFreezesAvailable: 1,
+  lastFreezeGrantedOn: null,
   unlockedTitles: ['anchor'],
 };
 
@@ -132,6 +133,8 @@ describe('toGamificationSnapshot', () => {
       'newlyUnlocked',
       'pointsDelta',
       'streakFreezesAvailable',
+      // Transient, like `pointsDelta` and `newlyUnlocked`: what THIS request spent, not stored state.
+      'streakFreezesSpent',
       'unlockedTitles',
     ]);
   });

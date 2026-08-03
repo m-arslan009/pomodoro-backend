@@ -29,6 +29,7 @@ const PROFILE: UserProfile = {
 };
 
 const GAMIFICATION: GamificationSnapshot = {
+  streakFreezesSpent: 0,
   balance: 550,
   lifetimePoints: 1050,
   currentDayStreak: 3,
@@ -56,10 +57,13 @@ describe('GamificationController', () => {
     controller = new GamificationController(gamification);
   });
 
-  it('reads the account the token names', async () => {
+  it('reads the account the token names, in that account’s timezone', async () => {
+    // The zone comes off the verified profile, never off the request. The read resolves elapsed
+    // days against it (ADR-014), so a client that could name its own zone could name its own day —
+    // and pick the one where its streak is still alive.
     await controller.read(authFor());
 
-    expect(gamification.getGamification).toHaveBeenCalledWith('user-1');
+    expect(gamification.getGamification).toHaveBeenCalledWith('user-1', PROFILE.timezone);
   });
 
   it('accepts no parameters at all', () => {
@@ -73,7 +77,7 @@ describe('GamificationController', () => {
   it('routes a different token to a different account', async () => {
     await controller.read(authFor({ ...PROFILE, id: 'user-2' }));
 
-    expect(gamification.getGamification).toHaveBeenCalledWith('user-2');
+    expect(gamification.getGamification).toHaveBeenCalledWith('user-2', PROFILE.timezone);
   });
 
   it('wraps the snapshot in its envelope', async () => {

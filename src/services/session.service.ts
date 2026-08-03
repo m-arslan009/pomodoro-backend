@@ -139,6 +139,8 @@ export class SessionService {
             outcome.state,
             outcome.pointsAwarded,
             outcome.newlyUnlocked,
+            // Announced here and only here: this is the request that made the spend real.
+            outcome.freezesSpent,
           ),
           replayed: false,
         };

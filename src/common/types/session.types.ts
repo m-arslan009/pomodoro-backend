@@ -82,6 +82,16 @@ export interface GamificationSnapshot {
   readonly longestDayStreak: number;
   readonly currentSessionRun: number;
   readonly streakFreezesAvailable: number;
+  /**
+   * Freezes this request spent to cover a missed day, so a "your streak was saved" notice fires
+   * exactly once — the same role `newlyUnlocked` plays for titles.
+   *
+   * ZERO ON A READ, and deliberately so. `GET /gamification` resolves elapsed days for display
+   * without persisting them (§14.6), so it re-derives the same pending spend on every poll;
+   * announcing it each time would report one covered day over and over. The spend is announced by
+   * the request that makes it real — the recorded session that writes it down.
+   */
+  readonly streakFreezesSpent: number;
   /** Points this request awarded. Zero on a read, and on anything that scores nothing. */
   readonly pointsDelta: number;
   readonly unlockedTitles: readonly string[];
@@ -93,6 +103,7 @@ export function toGamificationSnapshot(
   state: GamificationState,
   pointsDelta = 0,
   newlyUnlocked: readonly string[] = [],
+  streakFreezesSpent = 0,
 ): GamificationSnapshot {
   return {
     balance: state.balance,
@@ -101,6 +112,7 @@ export function toGamificationSnapshot(
     longestDayStreak: state.longestDayStreak,
     currentSessionRun: state.currentSessionRun,
     streakFreezesAvailable: state.streakFreezesAvailable,
+    streakFreezesSpent,
     pointsDelta,
     unlockedTitles: state.unlockedTitles,
     newlyUnlocked,

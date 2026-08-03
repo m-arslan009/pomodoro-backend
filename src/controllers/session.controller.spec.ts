@@ -49,6 +49,7 @@ const SESSION: Session = {
 };
 
 const GAMIFICATION: GamificationSnapshot = {
+  streakFreezesSpent: 0,
   balance: 100,
   lifetimePoints: 100,
   currentDayStreak: 1,
