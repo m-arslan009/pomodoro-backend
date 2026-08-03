@@ -401,3 +401,16 @@ required behavior.
 tests that verify the core streak rules. Do not attempt to cover every internal branch or
 implementation detail. Derive expected behavior from CONTRACT.md and the existing gamification
 rules. Test observable domain and persistence behavior, not private methods.
+
+## Feature gating — remove the title-based unlocking system completely
+
+`Title`: Remove title-based feature unlocking; every feature available to every authenticated user
+
+`User prompt`: Remove the title-based feature unlocking system completely. All product features must
+be available to every authenticated user regardless of title, level, points, streak, or gamification
+progress. Use the appropriate project skills for conflict handling, contract updates, implementation,
+verification, and testing. Do not bypass documented decisions silently.
+
+[On the decision-conflict prompt: chose full removal across both projects — the gate component, hook,
+helpers, and `TITLES[].feature` in both mirrors — and chose to keep titles themselves as identity and
+progression.]

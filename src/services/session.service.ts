@@ -26,8 +26,8 @@ import { TaskService } from './task.service';
  * This is the one endpoint in the product with real domain weight, and the responsibility split is
  * the point of it: the client owns the running countdown and reports what happened; the server owns
  * whether that is plausible, what it is worth, and what day it counts toward. The client computes
- * nothing — points drive titles and titles unlock features, so a client that scored itself could
- * award itself the product.
+ * nothing — the server owns the economy outright, so a client that scored itself could award itself
+ * points it never earned.
  *
  * Every completed or terminated interval becomes one immutable record. History and analytics are
  * derived from those records alone, which is why there are no statistics endpoints and no

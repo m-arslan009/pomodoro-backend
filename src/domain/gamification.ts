@@ -2,8 +2,8 @@
  * The points economy and the title ladder — pure, framework-free, ORM-free.
  *
  * THIS MODULE IS THE ONLY THING THAT SCORES. The client computes nothing: it reports what happened
- * and renders what comes back. That is not a style preference — points drive titles, titles unlock
- * features, so a client that could compute its own score could award itself the product.
+ * and renders what comes back. That is not a style preference — the server owns the economy
+ * outright, so a client that could compute its own score could award itself points it never earned.
  *
  * REPLAY EQUIVALENCE IS THE CONTRACT. `user_gamification` is a projection (ADR-006), and
  * `applySession` is the fold that produces it. Feeding every session for a user through this
@@ -56,20 +56,26 @@ export const STREAK_FREEZE = {
   maxAvailable: 2,
 } as const;
 
+/**
+ * TITLES ARE IDENTITY, NOT ACCESS (CONTRACT.md §9.6). Each title once carried a `feature` key that
+ * unlocked one previewable surface. Gating was deleted outright on 2026-08-03 — every product
+ * feature is available to every authenticated user, regardless of title, points, or streak — and
+ * the field went with it on both sides of the mirror. It was never read by any backend code:
+ * gating was only ever client-side presentation (ADR-010, "entitlements are not permissions").
+ */
 export interface Title {
   readonly key: string;
   readonly name: string;
   readonly threshold: number;
-  readonly feature: string;
 }
 
 /** Thresholds double at each rung. Mirrored by the frontend for display only. */
 export const TITLES: readonly Title[] = [
-  { key: 'anchor', name: 'The Anchor', threshold: 1000, feature: 'themeEditor' },
-  { key: 'paceSetter', name: 'The Pace Setter', threshold: 2000, feature: 'backgroundAndLabels' },
-  { key: 'catalyst', name: 'The Catalyst', threshold: 4000, feature: 'timeUtilization' },
-  { key: 'vanguard', name: 'The Vanguard', threshold: 8000, feature: 'graphicalReports' },
-  { key: 'paragon', name: 'The Paragon', threshold: 16000, feature: 'scheduling' },
+  { key: 'anchor', name: 'The Anchor', threshold: 1000 },
+  { key: 'paceSetter', name: 'The Pace Setter', threshold: 2000 },
+  { key: 'catalyst', name: 'The Catalyst', threshold: 4000 },
+  { key: 'vanguard', name: 'The Vanguard', threshold: 8000 },
+  { key: 'paragon', name: 'The Paragon', threshold: 16000 },
 ];
 
 /** Title keys unlocked at a lifetime total, ascending. Lifetime never decreases, so nor does this. */

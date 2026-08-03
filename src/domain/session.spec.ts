@@ -16,7 +16,7 @@ import {
  *
  * The client reports when a block ran and how much of it was focused; this module decides whether
  * that is plausible and bounds it before anything is computed from it. Points come out of these
- * numbers, and points unlock features — so every rule here is load-bearing against a client that
+ * numbers, and points drive titles — so every rule here is load-bearing against a client that
  * simply posts whatever it likes. None of these tests need a server, a clock, or a database, which
  * is the whole reason the rules live in src/domain.
  *

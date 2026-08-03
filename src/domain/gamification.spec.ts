@@ -18,7 +18,7 @@ import {
  * The points economy and the title ladder.
  *
  * THIS MODULE IS THE ONLY THING THAT SCORES, so it is the only thing standing between a user and
- * awarding themselves the product: points drive titles, and titles unlock features. Every rule here
+ * awarding themselves points they never earned, which titles are then derived from. Every rule here
  * is therefore tested against what a determined client would try, not only against the happy path.
  *
  * REPLAY EQUIVALENCE IS THE CONTRACT. `user_gamification` is a projection (ADR-006) and

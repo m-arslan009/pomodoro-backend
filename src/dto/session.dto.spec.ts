@@ -245,8 +245,8 @@ describe('recordSessionSchema', () => {
   describe('the closed field set', () => {
     it('refuses a client-supplied score', () => {
       /*
-       * THE ONE THAT MATTERS MOST. Points drive titles and titles unlock features, so a schema that
-       * accepted this would be a schema that let a client award itself the product.
+       * THE ONE THAT MATTERS MOST. The server owns the economy outright, so a schema that accepted
+       * this would be a schema that let a client award itself points it never earned.
        */
       expect(recordSessionSchema.safeParse(record({ pointsAwarded: 10_000 })).success).toBe(false);
     });
