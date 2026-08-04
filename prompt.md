@@ -414,3 +414,40 @@ verification, and testing. Do not bypass documented decisions silently.
 [On the decision-conflict prompt: chose full removal across both projects — the gate component, hook,
 helpers, and `TITLES[].feature` in both mirrors — and chose to keep titles themselves as identity and
 progression.]
+
+## Session persistence — refresh token in an HttpOnly cookie
+
+`Title`: Keep users signed in across reloads via a refresh token in an HttpOnly, Secure, SameSite cookie
+
+`User prompt`: Update the application's authentication flow so users remain signed in and can resume
+their session after refreshing or reopening the page. On application startup, check for an existing
+authenticated session and, when the access token is missing or expired, automatically request a new
+access token using the refresh token. Store the refresh token securely in an HttpOnly, Secure, and
+SameSite cookie rather than localStorage, and keep the access token in memory where possible.
+
+[Collided with ADR-008 revision 2 (single stateless JWT, no refresh token, no cookie, a reload signs
+the user out), which the user had chosen explicitly on 2026-07-29. Raised as a decision conflict; the
+user confirmed the supersession. Recorded as ADR-008 revision 3 — revision 1 reinstated. Chose a
+DB-backed rotating opaque refresh token over a stateless signed refresh JWT, so revocation is real.
+Also chose in scope: rotation reuse-detection, change-password revoking other sessions, and an
+unguarded cookie-driven logout. Deferred: refetch-on-focus for long-lived tabs, and `logout-all`.
+Out of scope: the Netlify production rewrite — local dev only.]
+
+[Shipped in two phases. A0 recorded the supersession and amended CONTRACT.md before any code landed.
+A1 reinstated `auth_sessions` in the shape `20260729120000_drop_auth_sessions` destroyed, plus a
+CHECK that the idle window never outlives the ceiling; added `domain/auth-session.ts` (pure — the
+`Math.min` that makes every rotated successor inherit its predecessor's `absolute_expires_at`),
+`auth-session.repository.ts`, `refresh-token.service.ts`, `common/utils/cookies.ts`, and
+`POST /auth/refresh`; made `logout` unguarded and cookie-driven; set CORS `credentials: true`; added
+`req.headers.cookie` and `res.headers["set-cookie"]` to the Pino redaction list. Three decisions were
+made during implementation rather than in planning: `changePassword` revokes **every** session and
+immediately opens a fresh one for the caller, rather than sparing the caller's — a mistaken exclusion
+would leave a session alive across a password change, where a mistaken revocation costs one sign-in;
+the login-time purge keeps revoked rows for a whole idle window, because reuse detection reads them;
+and `REFRESH_THROTTLE` is 20/min rather than reusing `CREDENTIAL_THROTTLE`, since a 429 from
+`/auth/refresh` is not a 401 and would eject a signed-in user. `JWT_ACCESS_TTL_MS` moved 8 h → 15 min
+in A2, not A1, so no phase boundary shipped a shorter window without the renewal that hides it. No
+new production dependency: `res.cookie` is native Express, so `cookie-parser` was replaced by a
+ten-line header reader. Verified against a live database — rotation, replay killing the family,
+indistinguishable 401s, logout revoking for real, ten rotations leaving the ceiling unchanged, and
+no cookie value in the logs at `LOG_LEVEL=debug`.]

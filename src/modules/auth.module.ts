@@ -7,12 +7,14 @@ import type { Env } from '../config/env.schema';
 import { AuthController } from '../controllers/auth.controller';
 import { UserController } from '../controllers/user.controller';
 import { JwtGuard } from '../guards/jwt.guard';
+import { AuthSessionRepository } from '../repositories/auth-session.repository';
 import { UserAvatarRepository } from '../repositories/user-avatar.repository';
 import { UserRepository } from '../repositories/user.repository';
 import { AccessTokenService } from '../services/access-token.service';
 import { Argon2PasswordHasher } from '../services/argon2-password-hasher.service';
 import { AuthService } from '../services/auth.service';
 import { AvatarService } from '../services/avatar.service';
+import { RefreshTokenService } from '../services/refresh-token.service';
 import { SystemClock } from '../services/system-clock.service';
 import { UserService } from '../services/user.service';
 
@@ -59,6 +61,14 @@ import { UserService } from '../services/user.service';
     UserService,
     AvatarService,
     AccessTokenService,
+    /*
+     * Not exported, and that is the point. A feature module has no business minting or revoking a
+     * credential, and nothing outside this module may touch auth_sessions (ADR-020). Unlike
+     * AccessTokenService and UserRepository below, no guard needs these to be constructible
+     * elsewhere, so the narrow default is also the correct one.
+     */
+    RefreshTokenService,
+    AuthSessionRepository,
     JwtGuard,
     UserRepository,
     UserAvatarRepository,

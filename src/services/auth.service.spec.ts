@@ -6,9 +6,11 @@ import type { Clock } from '../common/ports/clock.port';
 import { PasswordHasher } from '../common/ports/password-hasher.port';
 import type { AuthContext, UserRecord } from '../common/types/user.types';
 import type { Env } from '../config/env.schema';
+import type { AuthSessionRepository } from '../repositories/auth-session.repository';
 import type { CreateUserInput, UserRepository } from '../repositories/user.repository';
 import { AccessTokenService } from './access-token.service';
 import { AuthService } from './auth.service';
+import { RefreshTokenService } from './refresh-token.service';
 
 /*
  * The service is exercised against fakes rather than mocks with expectations: what matters is
@@ -29,7 +31,12 @@ const ENV = {
   JWT_ACCESS_TTL_MS: 8 * HOUR,
   JWT_ISSUER: 'evergrove',
   JWT_AUDIENCE: 'evergrove-web',
+  SESSION_IDLE_TTL_MS: 7 * 24 * HOUR,
+  SESSION_ABSOLUTE_TTL_MS: 30 * 24 * HOUR,
 } as const;
+
+/** Every flow that opens a session records the device; nothing here asserts on it. */
+const DEVICE = { userAgent: 'vitest', ip: '127.0.0.1' } as const;
 
 /** The claims a signed access token carries, read without verifying it. */
 function claimsOf(accessToken: string): Record<string, unknown> {
@@ -87,6 +94,7 @@ describe('AuthService', () => {
   let service: AuthService;
   let conflicts: Array<'email' | 'username'>;
   let stored: UserRecord | null;
+  let authSessions: AuthSessionRepository;
 
   beforeEach(() => {
     hasher = new FakeHasher();
@@ -122,7 +130,31 @@ describe('AuthService', () => {
 
     const accessTokens = new AccessTokenService(new JwtService({ secret: SIGNING_KEY }), config);
 
-    service = new AuthService(users, hasher, clock, accessTokens);
+    /*
+     * An in-memory stand-in for auth_sessions. Rotation and reuse detection are RefreshTokenService's
+     * rules and are covered where they live; what these tests need is only that opening a session
+     * succeeds, so every AuthService flow can be exercised end to end.
+     */
+    authSessions = {
+      create: vi.fn(() =>
+        Promise.resolve({
+          id: 'session-1',
+          userId: 'user-1',
+          expiresAt: new Date(NOW.getTime() + ENV.SESSION_IDLE_TTL_MS),
+          absoluteExpiresAt: new Date(NOW.getTime() + ENV.SESSION_ABSOLUTE_TTL_MS),
+          revokedAt: null,
+        }),
+      ),
+      findByTokenHash: vi.fn(() => Promise.resolve(null)),
+      rotate: vi.fn(),
+      revokeById: vi.fn(() => Promise.resolve()),
+      revokeAllForUser: vi.fn(() => Promise.resolve()),
+      purgeExpiredForUser: vi.fn(() => Promise.resolve()),
+    } as unknown as AuthSessionRepository;
+
+    const refreshTokens = new RefreshTokenService(authSessions, clock, config);
+
+    service = new AuthService(users, hasher, clock, accessTokens, refreshTokens);
   });
 
   describe('login', () => {
@@ -132,14 +164,14 @@ describe('AuthService', () => {
     };
 
     it('accepts an email identifier', async () => {
-      const result = await service.login(CREDENTIALS);
+      const result = await service.login(CREDENTIALS, DEVICE);
 
       expect(result.profile.username).toBe('Ada_L');
       expect(users.findByEmail).toHaveBeenCalledWith('ada@evergrove.app');
     });
 
     it('accepts a username identifier in any casing', async () => {
-      const result = await service.login({ ...CREDENTIALS, identifier: 'ADA_L' });
+      const result = await service.login({ ...CREDENTIALS, identifier: 'ADA_L' }, DEVICE);
 
       expect(result.profile.id).toBe('user-1');
       expect(users.findByUsernameKey).toHaveBeenCalledWith('ada_l');
@@ -147,29 +179,36 @@ describe('AuthService', () => {
     });
 
     it('never returns the credential material in the profile', async () => {
-      const result = await service.login(CREDENTIALS);
+      const result = await service.login(CREDENTIALS, DEVICE);
 
       expect(Object.values(result.profile)).not.toContain('hashed:correct horse battery staple');
       expect(result.profile).not.toHaveProperty('passwordHash');
     });
 
     it('answers with an access token that names the user and nothing else', async () => {
-      const result = await service.login(CREDENTIALS);
+      const result = await service.login(CREDENTIALS, DEVICE);
 
       expect(result.accessTokenExpiresIn).toBe(8 * HOUR);
 
       const claims = claimsOf(result.accessToken);
       expect(claims.sub).toBe('user-1');
-      // The token is the whole credential and it is readable by anyone holding it, so what it
-      // carries is a security decision: identity and validity, never profile data.
+      /*
+       * The token is readable by anyone holding it, so what it carries is a security decision:
+       * identity and validity, never profile data. Note the absence of `sid` — ADR-008 rev. 3
+       * reinstated sessions but deliberately did not reinstate the claim, because the cookie is
+       * the session's name and `logout` reads that instead.
+       */
       expect(Object.keys(claims).sort()).toEqual(['aud', 'exp', 'iat', 'iss', 'sub']);
     });
 
-    it('records the sign-in without persisting a session', async () => {
-      await service.login(CREDENTIALS);
+    it('records the sign-in and opens a refresh session', async () => {
+      await service.login(CREDENTIALS, DEVICE);
 
-      // last_login_at is now the only trace a sign-in leaves; there is no row to write and
-      // nothing for a later request to look up.
+      expect(authSessions.create).toHaveBeenCalledTimes(1);
+
+      // Both traces, and they answer different questions: the session row is what a later refresh
+      // looks up and what logout revokes, while last_login_at is the account-level fact that
+      // survives the session being revoked, expiring, or purged.
       expect(users.markLogin).toHaveBeenCalledWith('user-1', NOW);
     });
 
@@ -177,7 +216,10 @@ describe('AuthService', () => {
       stored = null;
 
       await expect(
-        service.login({ identifier: 'nobody@evergrove.app', password: 'whatever-long-enough' }),
+        service.login(
+          { identifier: 'nobody@evergrove.app', password: 'whatever-long-enough' },
+          DEVICE,
+        ),
       ).rejects.toMatchObject({ problem: { status: 401, title: 'Invalid credentials' } });
 
       // The dummy verification is what keeps response *timing* from enumerating accounts.
@@ -186,7 +228,7 @@ describe('AuthService', () => {
 
     it('rejects a wrong password with the identical problem response', async () => {
       const error = await service
-        .login({ ...CREDENTIALS, password: 'wrong but long enough' })
+        .login({ ...CREDENTIALS, password: 'wrong but long enough' }, DEVICE)
         .catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(ProblemException);
@@ -203,7 +245,7 @@ describe('AuthService', () => {
       stored = makeUser({ passwordHash: 'legacy:correct horse battery staple' });
       hasher.verify = () => Promise.resolve(true);
 
-      await service.login({ ...CREDENTIALS, password: 'a-valid-password' });
+      await service.login({ ...CREDENTIALS, password: 'a-valid-password' }, DEVICE);
 
       expect(users.updatePasswordHashOnly).toHaveBeenCalledWith(
         'user-1',
@@ -222,19 +264,19 @@ describe('AuthService', () => {
     };
 
     it('stores the display username alongside its lowercase uniqueness key', async () => {
-      await service.register({ ...SIGNUP, timezone: 'Europe/London' });
+      await service.register({ ...SIGNUP, timezone: 'Europe/London' }, DEVICE);
 
       expect(createdUsers[0]).toMatchObject({ username: 'Ada_L', usernameLower: 'ada_l' });
     });
 
     it('defaults the timezone when the client could not determine one', async () => {
-      await service.register({ ...SIGNUP, username: 'ada_l' });
+      await service.register({ ...SIGNUP, username: 'ada_l' }, DEVICE);
 
       expect(createdUsers[0]?.timezone).toBe('UTC');
     });
 
     it('signs the new account in rather than making it log in again', async () => {
-      const result = await service.register(SIGNUP);
+      const result = await service.register(SIGNUP, DEVICE);
 
       expect(result.accessToken).toBeTruthy();
       expect(result.accessTokenExpiresIn).toBe(8 * HOUR);
@@ -242,7 +284,7 @@ describe('AuthService', () => {
 
     it('rejects a password containing the username before touching the database', async () => {
       await expect(
-        service.register({ ...SIGNUP, username: 'ada_l', password: 'my ada_l password' }),
+        service.register({ ...SIGNUP, username: 'ada_l', password: 'my ada_l password' }, DEVICE),
       ).rejects.toMatchObject({ problem: { status: 422 } });
 
       expect(users.create).not.toHaveBeenCalled();
@@ -252,7 +294,7 @@ describe('AuthService', () => {
       conflicts = ['email', 'username'];
 
       const error = (await service
-        .register({ ...SIGNUP, username: 'ada_l' })
+        .register({ ...SIGNUP, username: 'ada_l' }, DEVICE)
         .catch((caught: unknown) => caught)) as ProblemException;
 
       expect(error.problem.status).toBe(409);
@@ -280,29 +322,44 @@ describe('AuthService', () => {
     };
 
     it('records the change and hands this device a fresh token', async () => {
-      const result = await service.changePassword(auth, {
-        currentPassword: 'correct horse battery staple',
-        newPassword: 'an entirely different one',
-      });
+      const result = await service.changePassword(
+        auth,
+        {
+          currentPassword: 'correct horse battery staple',
+          newPassword: 'an entirely different one',
+        },
+        DEVICE,
+      );
 
       expect(users.updatePassword).toHaveBeenCalledWith(
         'user-1',
         'hashed:an entirely different one',
         NOW,
       );
-      // The caller stays signed in. Note what is *not* asserted: nothing revokes anything,
-      // because there is nothing to revoke — tokens already issued to other devices go on
-      // working until they expire. That is the accepted cost of a stateless design, and it is
-      // stated here so the omission reads as a decision rather than an oversight.
+      /*
+       * Every other device is signed out, and the caller is not (ADR-008 rev. 3). Revoke-all runs
+       * *before* the new session opens, so the fresh one is not caught by it — asserting both is
+       * what pins that ordering, which is the part a refactor would silently break.
+       *
+       * What is still *not* asserted, because it is still true: access tokens already issued
+       * elsewhere keep working until they expire. JwtGuard reads no session row, so revocation
+       * stops a device renewing, not a token being used.
+       */
+      expect(authSessions.revokeAllForUser).toHaveBeenCalledWith('user-1', NOW);
+      expect(authSessions.create).toHaveBeenCalledTimes(1);
       expect(result.accessToken).toBeTruthy();
     });
 
     it('rejects a wrong current password without changing anything', async () => {
       await expect(
-        service.changePassword(auth, {
-          currentPassword: 'not my password',
-          newPassword: 'an entirely different one',
-        }),
+        service.changePassword(
+          auth,
+          {
+            currentPassword: 'not my password',
+            newPassword: 'an entirely different one',
+          },
+          DEVICE,
+        ),
       ).rejects.toMatchObject({
         problem: {
           status: 422,
@@ -315,10 +372,14 @@ describe('AuthService', () => {
 
     it('refuses to reuse the current password', async () => {
       await expect(
-        service.changePassword(auth, {
-          currentPassword: 'correct horse battery staple',
-          newPassword: 'correct horse battery staple',
-        }),
+        service.changePassword(
+          auth,
+          {
+            currentPassword: 'correct horse battery staple',
+            newPassword: 'correct horse battery staple',
+          },
+          DEVICE,
+        ),
       ).rejects.toMatchObject({ problem: { status: 422 } });
     });
 
@@ -326,10 +387,14 @@ describe('AuthService', () => {
       stored = null;
 
       await expect(
-        service.changePassword(auth, {
-          currentPassword: 'correct horse battery staple',
-          newPassword: 'an entirely different one',
-        }),
+        service.changePassword(
+          auth,
+          {
+            currentPassword: 'correct horse battery staple',
+            newPassword: 'an entirely different one',
+          },
+          DEVICE,
+        ),
       ).rejects.toMatchObject({ problem: { status: 401 } });
     });
   });

@@ -32,15 +32,20 @@ async function bootstrap(): Promise<void> {
    * CORS exists for local development only. In production the SPA reaches the API through the
    * Netlify `/api/*` rewrite, which makes every call same-origin.
    *
-   * No `credentials: true`: the API sets no cookies and reads none, so the browser has no
-   * ambient credential to withhold. The access token rides in an explicit header instead —
-   * which is also why Authorization is listed here, since it is not CORS-safelisted and the
-   * preflight would otherwise refuse every authenticated request.
+   * `credentials: true` since ADR-008 rev. 3: the refresh token is an HttpOnly cookie, and without
+   * this the browser withholds it on any cross-origin call — which is every call in a dev setup
+   * that points Vite straight at this port. `Authorization` stays listed because it is not
+   * CORS-safelisted and the preflight would otherwise refuse every authenticated request.
+   *
+   * `origin` must stay the allowlist-or-`false` expression below. `origin: true` reflects whatever
+   * Origin the caller sent, and reflecting an arbitrary origin *with* credentials enabled lets any
+   * site read authenticated responses — the two settings are safe apart and an open door together.
    */
   const origins = config.get('CORS_ORIGINS', { infer: true });
   app.enableCors({
     origin: origins.length > 0 ? origins : false,
     allowedHeaders: ['Authorization', 'Content-Type'],
+    credentials: true,
   });
 
   // Behind Fly/Render's proxy, req.ip is the load balancer without this.

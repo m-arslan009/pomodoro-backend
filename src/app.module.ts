@@ -28,14 +28,21 @@ import { TaskModule } from './modules/task.module';
            * Credentials must never reach a log file. Removing rather than masking keeps the
            * field out entirely, so a log shipper cannot later "helpfully" index it.
            *
-           * The access token is the whole credential now, so the Authorization header is the
-           * critical entry. `res.body.accessToken` matches nothing today — pino-http does not
-           * serialise response bodies — and is listed so that turning on a body serialiser to
-           * debug the auth flow cannot be the change that starts writing live tokens to disk.
+           * The two cookie entries are **not** speculative, unlike `res.body.accessToken` below.
+           * pino-http's default serialisers *do* log `req.headers` and `res.headers`, so from the
+           * moment ADR-008 rev. 3 introduced a refresh cookie, omitting these would write the
+           * plaintext long-lived credential to disk on every auth request — at the development
+           * default of LOG_LEVEL=debug, on every developer's machine.
+           *
+           * `res.body.accessToken` still matches nothing, because response bodies are not
+           * serialised. It is listed so that turning on a body serialiser to debug the auth flow
+           * cannot be the change that starts writing live tokens to disk.
            */
           redact: {
             paths: [
               'req.headers.authorization',
+              'req.headers.cookie',
+              'res.headers["set-cookie"]',
               'req.body.password',
               'req.body.newPassword',
               'req.body.currentPassword',

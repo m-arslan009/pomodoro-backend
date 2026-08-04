@@ -8,8 +8,11 @@
 // `focus_sessions` was called `timer_intervals` in this comment while every index and constraint in
 // the architecture document named it `focus_sessions`. The table is `focus_sessions`.
 //
-// There is no session table. Authentication is a self-contained signed token that the server
-// keeps no record of, so a sign-in writes nothing but `last_login_at`.
+// Authentication is two credentials (ADR-008 rev. 3): a short signed access token the server keeps
+// no record of, and a rotating opaque refresh token that `auth_sessions` *is* the record of. The
+// access half is still stateless — `JwtGuard` verifies a signature and never reads a row — so the
+// session table bounds a compromise rather than closing it. A sign-in writes `last_login_at` and one
+// `auth_sessions` row.
 //
 // The connection URL lives in ../prisma.config.ts (Prisma 7 no longer accepts `url` here).
 
@@ -53,11 +56,15 @@ model User {
   /// behavioural migration. Nothing may gate on it until that flow exists.
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
 
-  /// Audit only. Authentication is stateless (ADR-008), so nothing consults this to invalidate a
-  /// token — it records *when* the credential changed, for a future security panel.
+  /// Audit only, still. Changing a password now revokes every other `auth_sessions` row (ADR-008
+  /// rev. 3), so "sign out my other devices" is enforced by *deleting the sessions*, not by
+  /// comparing this column against a token's `iat`. No guard reads it. It records *when* the
+  /// credential changed, for a future security panel.
   passwordChangedAt DateTime @default(now()) @map("password_changed_at") @db.Timestamptz(3)
 
-  /// The only record that a sign-in happened, now that sessions are not persisted at all.
+  /// When the user last presented a password. Distinct from `auth_sessions.created_at`, which
+  /// records the same event per session — this is the account-level answer, and it survives the
+  /// session being revoked or expiring.
   lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(3)
 
   /// When the avatar last changed, or null when there is none. Denormalised from `user_avatars`
@@ -73,8 +80,58 @@ model User {
   tasks        Task[]
   sessions     FocusSession[]
   gamification UserGamification?
+  authSessions AuthSession[]
 
   @@map("users")
+}
+
+/// A refresh session — the revocable half of the credential pair (ADR-008 rev. 3).
+///
+/// Reinstates the table `20260729120000_drop_auth_sessions` destroyed. Nothing on the request path
+/// reads it: `JwtGuard` verifies a signature and stops there, so an access token stays valid for its
+/// full 15 minutes no matter what happens here. This table bounds a compromise; it does not close
+/// one. What it buys is that `logout` and `change-password` mean something again.
+///
+/// Note the name. A *focus* session is a pomodoro interval (`focus_sessions`); an *auth* session is
+/// a login. They are unrelated, and the repositories are deliberately named apart.
+model AuthSession {
+  id     String @id @default(uuid(7)) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// SHA-256 of the opaque cookie value — 32 raw bytes, so `Bytes` rather than a hex string. The
+  /// plaintext exists only in the browser's cookie jar, which is why a dump of this table is not a
+  /// set of usable sessions. UNIQUE is both the lookup path and the collision guard.
+  tokenHash Bytes @unique @map("token_hash")
+
+  /// The sliding idle window, pushed forward on every rotation — but never past the ceiling below.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  /// The hard cap, and **inherited by every rotated successor**. Without that inheritance a client
+  /// refreshing every 15 minutes would push the 30-day limit forward forever, which is to say there
+  /// would be no limit. This column is the whole reason the cap is real.
+  absoluteExpiresAt DateTime @map("absolute_expires_at") @db.Timestamptz(3)
+
+  lastSeenAt DateTime @map("last_seen_at") @db.Timestamptz(3)
+
+  /// Set on rotation and on logout — and the row is **kept**, never deleted. That is what makes a
+  /// replayed token distinguishable from an unknown one: an unknown hash matches nothing, while a
+  /// replayed one matches a revoked row, which is a theft signal rather than a typo.
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  /// Forensics only, and the only trail a compromised session leaves. Free to capture at insert.
+  userAgent String? @map("user_agent") @db.VarChar(512)
+  ip        String? @db.VarChar(45)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Revoke-all-for-user, on password change and on reuse detection.
+  @@index([userId])
+  /// Serves the opportunistic purge on login. Since `expires_at <= absolute_expires_at` always,
+  /// sweeping on the idle window is an index-driven superset of the genuinely dead rows.
+  @@index([expiresAt])
+  @@map("auth_sessions")
 }
 
 /// A profile photo, stored as bytes in Postgres (ADR-015 rev. 2).
