@@ -241,6 +241,26 @@ describe('AuthService', () => {
       expect(users.markLogin).not.toHaveBeenCalled();
     });
 
+    it('gives a provider-created account the same rejection, and the same work, as a wrong password', async () => {
+      // Created through Google, so there is no password and no password can ever match (ADR-008a).
+      stored = makeUser({ passwordHash: null });
+
+      const error = (await service
+        .login(CREDENTIALS, DEVICE)
+        .catch((caught: unknown) => caught)) as ProblemException;
+
+      expect(error.problem).toMatchObject({ status: 401, title: 'Invalid credentials' });
+      /*
+       * Both halves matter. The identical response stops the login form answering "that account
+       * signed up with Google", and the dummy verification stops response *timing* answering it
+       * instead — skipping the Argon2 cost here would make this branch measurably faster and turn
+       * the endpoint into an oracle for which accounts use a provider.
+       */
+      expect(hasher.dummyVerifications).toBe(1);
+      expect(hasher.verifications).toBe(0);
+      expect(users.markLogin).not.toHaveBeenCalled();
+    });
+
     it('upgrades an outdated hash on successful login', async () => {
       stored = makeUser({ passwordHash: 'legacy:correct horse battery staple' });
       hasher.verify = () => Promise.resolve(true);
@@ -381,6 +401,35 @@ describe('AuthService', () => {
           DEVICE,
         ),
       ).rejects.toMatchObject({ problem: { status: 422 } });
+    });
+
+    it('tells a provider-created account plainly that it has no password to change', async () => {
+      stored = makeUser({ passwordHash: null });
+
+      await expect(
+        service.changePassword(
+          auth,
+          {
+            currentPassword: 'correct horse battery staple',
+            newPassword: 'an entirely different one',
+          },
+          DEVICE,
+        ),
+      ).rejects.toMatchObject({
+        problem: {
+          status: 422,
+          errors: [
+            { field: 'currentPassword', message: 'This account does not have a password yet.' },
+          ],
+        },
+      });
+
+      /*
+       * Unlike the login path, this one may say so. The caller has already proved they are this
+       * user, so there is nothing left to enumerate — and a generic "wrong password" would leave
+       * someone typing guesses at a field that can never be satisfied.
+       */
+      expect(users.updatePassword).not.toHaveBeenCalled();
     });
 
     it('refuses when the authenticated account no longer exists', async () => {
