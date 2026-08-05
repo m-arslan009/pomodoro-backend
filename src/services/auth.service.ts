@@ -116,6 +116,22 @@ export class AuthService {
       throw invalidCredentialsProblem();
     }
 
+    /*
+     * A provider-created account has no password, and it must fail exactly like a wrong one
+     * (ADR-008a). Both halves matter: the same problem response, *and* the same dummy verification,
+     * because skipping the Argon2 cost would make this branch measurably faster and turn the login
+     * endpoint into an oracle for "which accounts signed up with Google".
+     *
+     * The user-visible consequence is real and is answered elsewhere: someone who registered with
+     * Google and then types a password gets a generic rejection with no route forward, so the login
+     * page carries static copy pointing at the Google button. A differentiated error here would be
+     * kinder and would also be the enumeration leak.
+     */
+    if (user.passwordHash === null) {
+      await this.hasher.verifyDummy(dto.password);
+      throw invalidCredentialsProblem();
+    }
+
     if (!(await this.hasher.verify(user.passwordHash, dto.password))) {
       throw invalidCredentialsProblem();
     }
@@ -189,6 +205,19 @@ export class AuthService {
     const user = await this.users.findById(auth.userId);
     if (!user) throw notAuthenticatedProblem();
 
+    /*
+     * No password to change. Unlike the login path this may say so plainly: the caller has already
+     * proved they are this user, so there is nothing left to enumerate — and a generic "wrong
+     * password" would leave someone typing guesses at a field that can never be satisfied.
+     *
+     * `POST /auth/set-password` (§4.17) is the route forward, and it does not exist yet.
+     */
+    if (user.passwordHash === null) {
+      throw validationProblem([
+        { field: 'currentPassword', message: 'This account does not have a password yet.' },
+      ]);
+    }
+
     if (!(await this.hasher.verify(user.passwordHash, dto.currentPassword))) {
       throw validationProblem([
         { field: 'currentPassword', message: 'That is not your current password.' },
@@ -232,8 +261,14 @@ export class AuthService {
   /**
    * The one place a session begins, so every successful flow answers the same shape and no path can
    * accidentally issue half a credential pair.
+   *
+   * Public since ADR-008a, and this is the whole reason Google sign-in leaves the session layer
+   * untouched: the OAuth callback proves an identity by a different route and then calls exactly
+   * this, so a provider session and a password session are the same object, with the same cookie,
+   * the same rotation, the same reuse detection and the same ceiling. There is deliberately no
+   * second way to start a session, and a caller that wants one is doing something wrong.
    */
-  private async startSession(user: UserRecord, device: DeviceContext): Promise<AuthResult> {
+  async startSession(user: UserRecord, device: DeviceContext): Promise<AuthResult> {
     const access = await this.accessTokens.issue(user.id);
     const refresh = await this.refreshTokens.issue(user.id, device);
 

@@ -74,6 +74,37 @@ export const envSchema = z
     SESSION_COOKIE_NAME: z.string().min(1).default('evergrove_session'),
     SESSION_IDLE_TTL_MS: z.coerce.number().int().positive().default(604_800_000),
     SESSION_ABSOLUTE_TTL_MS: z.coerce.number().int().positive().default(2_592_000_000),
+
+    /*
+     * Google sign-in (ADR-008a). Off unless switched on, so a deployment that has not registered an
+     * OAuth client serves `{"providers": []}` and the sign-in button never appears — rather than
+     * shipping a control that 404s.
+     *
+     * Compared as a string rather than through `z.coerce.boolean()`, which maps the string "false"
+     * to *true* and would turn `OAUTH_ENABLED=false` into an enabled feature. The same trap is
+     * already documented above for the cookie's Secure flag.
+     */
+    OAUTH_ENABLED: z
+      .string()
+      .default('false')
+      .transform((value) => value.trim().toLowerCase() === 'true'),
+
+    /*
+     * The browser-facing origin of the app — the Vite dev server locally, the Netlify site in
+     * production. It builds two things that must agree with each other and with the Google Cloud
+     * Console: the `redirect_uri` sent in the authorization request, and the absolute URL the
+     * callback finally redirects the browser to.
+     *
+     * Never derived from the request. A `Host` header is attacker-controlled, and deriving a
+     * redirect target from one is how an open redirect gets built by accident.
+     */
+    APP_ORIGIN: z.string().url('APP_ORIGIN must be an absolute URL.').optional(),
+
+    GOOGLE_CLIENT_ID: z.string().optional(),
+    GOOGLE_CLIENT_SECRET: z.string().optional(),
+
+    /** Lifetime of the signed OAuth transaction cookie, and the window a `state` stays useful. */
+    OAUTH_TXN_TTL_MS: z.coerce.number().int().positive().default(600_000),
   })
   /*
    * Two cross-field rules, each encoding a failure that is otherwise silent.
@@ -97,6 +128,24 @@ export const envSchema = z
         path: ['SESSION_IDLE_TTL_MS'],
         message: 'SESSION_IDLE_TTL_MS must not exceed SESSION_ABSOLUTE_TTL_MS.',
       });
+    }
+
+    /*
+     * Switching Google sign-in on without its three settings would boot cleanly and then fail at
+     * the first user who clicked the button — as a 500 on a redirect route, which renders as a
+     * blank page. Failing here instead turns it into a startup error naming the missing variable.
+     */
+    if (!env.OAUTH_ENABLED) return;
+
+    const required = ['APP_ORIGIN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'] as const;
+    for (const key of required) {
+      if (env[key] === undefined || env[key].trim() === '') {
+        ctx.addIssue({
+          code: 'custom',
+          path: [key],
+          message: `${key} is required when OAUTH_ENABLED is true.`,
+        });
+      }
     }
   });
 

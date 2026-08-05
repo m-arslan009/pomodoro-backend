@@ -18,6 +18,23 @@ export interface CreateUserInput {
   readonly timezone: string;
 }
 
+/**
+ * An account created from a provider's assertion (ADR-008a). No password: this account's only
+ * credential is the identity created alongside it, which is why the two are written together.
+ */
+export interface CreateUserFromIdentityInput {
+  readonly email: string;
+  readonly username: string;
+  readonly usernameLower: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly timezone: string;
+  /** Set because the provider asserted the address is verified — never on any other basis. */
+  readonly emailVerifiedAt: Date;
+  readonly provider: string;
+  readonly providerSubject: string;
+}
+
 /** Which unique identifiers a registration collided with. */
 export type UserConflictField = 'email' | 'username';
 
@@ -85,6 +102,69 @@ export class UserRepository {
       // An unrecognised target still means "taken"; reporting both is better than reporting none.
       return { ok: false, conflicts: conflicts.length > 0 ? conflicts : ['email', 'username'] };
     }
+  }
+
+  /**
+   * Create an account and its provider identity in one statement.
+   *
+   * The atomicity is the whole reason this is not two calls. An account created from a provider has
+   * a null `password_hash`, so the identity *is* its only credential — and a failure between the two
+   * inserts would leave an account nobody can ever sign into, holding an email address that now
+   * blocks re-registration. A nested write is one statement in one implicit transaction, so that
+   * state cannot exist.
+   *
+   * It reaches into `auth_identities`, which `AuthIdentityRepository` otherwise owns. That is the
+   * narrower violation: the alternative is passing a transaction handle across two repositories,
+   * which leaks the ORM into the service layer that ADR-004's escape hatch depends on keeping clean.
+   */
+  async createFromIdentity(input: CreateUserFromIdentityInput): Promise<CreateUserResult> {
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          email: input.email,
+          username: input.username,
+          usernameLower: input.usernameLower,
+          firstName: input.firstName,
+          lastName: input.lastName,
+          timezone: input.timezone,
+          emailVerifiedAt: input.emailVerifiedAt,
+          passwordHash: null,
+          identities: {
+            create: {
+              provider: input.provider,
+              providerSubject: input.providerSubject,
+              emailAtLink: input.email,
+            },
+          },
+        },
+      });
+      return { ok: true, user };
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+
+      const target = JSON.stringify(error.meta?.target ?? '');
+      const conflicts: UserConflictField[] = [];
+      if (target.includes('email')) conflicts.push('email');
+      if (target.includes('username')) conflicts.push('username');
+
+      /*
+       * A collision on `auth_identities` reports neither, and the caller must not read that as
+       * "the username was free". Reporting both is the safe default here as it is in `create`:
+       * it says "something was taken" without claiming to know what.
+       */
+      return { ok: false, conflicts: conflicts.length > 0 ? conflicts : ['email', 'username'] };
+    }
+  }
+
+  /**
+   * Record that the address is verified, and only ever because a provider asserted it.
+   *
+   * Written for the first time by ADR-008a; still read by nothing. No guard, route or rule gates on
+   * `email_verified_at`, and none may until the verification flow of §11 exists — this column
+   * currently records a fact, it does not grant anything.
+   */
+  async markEmailVerified(id: string, at: Date): Promise<void> {
+    await this.prisma.user.update({ where: { id }, data: { emailVerifiedAt: at } });
   }
 
   /**

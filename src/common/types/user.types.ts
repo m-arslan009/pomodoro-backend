@@ -14,7 +14,12 @@ export interface UserRecord {
   readonly usernameLower: string;
   readonly firstName: string;
   readonly lastName: string;
-  readonly passwordHash: string;
+  /**
+   * Null for an account created through a provider that has not set a password (ADR-008a). The
+   * type is the enforcement: every consumer is made to decide what "no password" means, and the
+   * only correct answer on a verification path is "nothing matches, and it costs the same".
+   */
+  readonly passwordHash: string | null;
   readonly timezone: string;
   readonly emailVerifiedAt: Date | null;
   readonly passwordChangedAt: Date;

@@ -47,13 +47,18 @@ model User {
   lastName  String @map("last_name") @db.VarChar(50)
 
   /// Argon2id encoded string — carries its own salt and parameters, so no salt/algo columns.
-  passwordHash String @map("password_hash") @db.VarChar(255)
+  ///
+  /// Nullable since ADR-008a. Null means the account was created through a provider and has never
+  /// set a password. Every path that verifies a password must treat null as "no password will ever
+  /// match" **and still pay the dummy-verify cost**, or the login endpoint starts answering faster
+  /// for provider-only accounts and becomes an enumeration oracle.
+  passwordHash String? @map("password_hash") @db.VarChar(255)
 
   /// IANA zone name. Load-bearing: every stored instant for this account is read through it.
   timezone String @default("UTC") @db.VarChar(64)
 
-  /// Ships nullable and unused, so email verification is later a pure addition rather than a
-  /// behavioural migration. Nothing may gate on it until that flow exists.
+  /// Written by a verified Google sign-in (ADR-008a) — the first and only writer. Still **read** by
+  /// nothing: no guard, route or rule gates on it, and none may until the verification flow exists.
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
 
   /// Audit only, still. Changing a password now revokes every other `auth_sessions` row (ADR-008
@@ -81,8 +86,53 @@ model User {
   sessions     FocusSession[]
   gamification UserGamification?
   authSessions AuthSession[]
+  identities   AuthIdentity[]
 
   @@map("users")
+}
+
+/// An external identity that can prove ownership of an Evergrove account (ADR-008a).
+///
+/// The credential is the provider's assertion, and `provider_subject` — never the email — is the
+/// identity. Emails change at the provider, and re-resolving by email would hand an account to
+/// whoever holds the old address next. That is why `email_at_link` below is audit material and is
+/// never a lookup key.
+///
+/// This table is the *identity-proof* layer only. It issues nothing and stores no provider token:
+/// the authorization request asks for `access_type=online`, so Google returns no refresh token, and
+/// the access token from the exchange is discarded with the response object. A session still means
+/// exactly what ADR-008 rev. 3 says it means — `auth_sessions`, reached through the same
+/// `startSession()` the password path uses.
+model AuthIdentity {
+  id     String @id @default(uuid(7)) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// 'google'. VarChar + CHECK rather than a Prisma enum, matching this schema's existing refusal
+  /// of them: adding a provider must be a migration someone reads, not a generated type change.
+  provider String @db.VarChar(32)
+
+  /// The OIDC `sub` claim. Opaque, immutable, and unique within the provider.
+  providerSubject String @map("provider_subject") @db.VarChar(255)
+
+  /// The address the provider asserted when the link was made. Audit only — never authoritative,
+  /// never a lookup key, and deliberately not kept in step with either side afterwards.
+  emailAtLink String? @map("email_at_link") @db.VarChar(320)
+
+  linkedAt    DateTime  @default(now()) @map("linked_at") @db.Timestamptz(3)
+  lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The sign-in lookup, and the guarantee that one Google account cannot reach two Evergrove ones.
+  /// Named explicitly: Prisma would derive `..._provider_provider_subject_key`, and the migration
+  /// creates the shorter name — leaving it implicit would report drift on the next `migrate dev`.
+  @@unique([provider, providerSubject], map: "auth_identities_provider_subject_key")
+  /// At most one identity per provider per account. Named for the same reason.
+  @@unique([userId, provider], map: "auth_identities_user_provider_key")
+  @@index([userId])
+  @@map("auth_identities")
 }
 
 /// A refresh session — the revocable half of the credential pair (ADR-008 rev. 3).
