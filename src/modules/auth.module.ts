@@ -5,8 +5,10 @@ import { Clock } from '../common/ports/clock.port';
 import { PasswordHasher } from '../common/ports/password-hasher.port';
 import type { Env } from '../config/env.schema';
 import { AuthController } from '../controllers/auth.controller';
+import { OAuthController } from '../controllers/oauth.controller';
 import { UserController } from '../controllers/user.controller';
 import { JwtGuard } from '../guards/jwt.guard';
+import { AuthIdentityRepository } from '../repositories/auth-identity.repository';
 import { AuthSessionRepository } from '../repositories/auth-session.repository';
 import { UserAvatarRepository } from '../repositories/user-avatar.repository';
 import { UserRepository } from '../repositories/user.repository';
@@ -14,6 +16,9 @@ import { AccessTokenService } from '../services/access-token.service';
 import { Argon2PasswordHasher } from '../services/argon2-password-hasher.service';
 import { AuthService } from '../services/auth.service';
 import { AvatarService } from '../services/avatar.service';
+import { GoogleOidcService } from '../services/google-oidc.service';
+import { OAuthService } from '../services/oauth.service';
+import { OAuthTransactionService } from '../services/oauth-transaction.service';
 import { RefreshTokenService } from '../services/refresh-token.service';
 import { SystemClock } from '../services/system-clock.service';
 import { UserService } from '../services/user.service';
@@ -55,12 +60,23 @@ import { UserService } from '../services/user.service';
       }),
     }),
   ],
-  controllers: [AuthController, UserController],
+  controllers: [AuthController, OAuthController, UserController],
   providers: [
     AuthService,
     UserService,
     AvatarService,
     AccessTokenService,
+    /*
+     * Provider sign-in (ADR-008a). Internal, like the session machinery above and for the same
+     * reason: these three between them can open a session for any account that proves an identity,
+     * and no feature module has business doing that. `JwtModule` above already supplies the signing
+     * key OAuthTransactionService uses for the transaction cookie — the same key, a different
+     * audience, so neither token type is accepted where the other belongs.
+     */
+    OAuthService,
+    GoogleOidcService,
+    OAuthTransactionService,
+    AuthIdentityRepository,
     /*
      * Not exported, and that is the point. A feature module has no business minting or revoking a
      * credential, and nothing outside this module may touch auth_sessions (ADR-020). Unlike

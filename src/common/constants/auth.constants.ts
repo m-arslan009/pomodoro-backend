@@ -39,3 +39,17 @@ export const AVATAR_THROTTLE = {
   limit: 10,
   ttl: 60_000,
 } as const;
+
+/**
+ * The two provider-sign-in redirect routes (ADR-008a).
+ *
+ * Not `CREDENTIAL_THROTTLE`: neither route accepts a guessable secret, and the callback is reached
+ * by the browser rather than by the user, so a 429 there aborts a sign-in the user has already
+ * consented to — with a generic error, because the callback cannot render a rate-limit explanation
+ * into a redirect. Ten a minute is far above what a person generates and still bounds an attacker
+ * hammering the callback with fabricated `state` values.
+ */
+export const OAUTH_THROTTLE = {
+  limit: 10,
+  ttl: 60_000,
+} as const;

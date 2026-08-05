@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { randomUUID } from 'node:crypto';
 import { LoggerModule } from 'nestjs-pino';
+import { stdSerializers } from 'pino';
 import { HealthController } from './controllers/health.controller';
 import { type Env, validateEnv } from './config/env.schema';
 import { PrismaModule } from './database/prisma.module';
@@ -11,6 +12,12 @@ import { AuthModule } from './modules/auth.module';
 import { SessionModule } from './modules/session.module';
 import { SettingsModule } from './modules/settings.module';
 import { TaskModule } from './modules/task.module';
+import { scrubRequestUrl } from './common/utils/log-redaction';
+
+/** The serialised request, as far as this file needs to know it. */
+interface SerializedRequest {
+  url?: unknown;
+}
 
 @Module({
   imports: [
@@ -47,8 +54,45 @@ import { TaskModule } from './modules/task.module';
               'req.body.newPassword',
               'req.body.currentPassword',
               'res.body.accessToken',
+              /*
+               * The OAuth callback's credentials, which arrive as query parameters rather than in a
+               * body (ADR-008a). `redact` covers the parsed `req.query`; the raw URL those values
+               * are also visible in is handled by the serialiser below, and it takes both because
+               * either one alone still writes the code to disk.
+               */
+              'req.query.code',
+              'req.query.state',
+              /*
+               * The *outbound* half, and the one this originally missed. The start route answers
+               * with a `Location` carrying `state`, `nonce` and the PKCE challenge, and pino-http
+               * serialises response headers — so redacting the request alone still wrote the
+               * authorization request's parameters to disk on every sign-in.
+               *
+               * Removed declaratively rather than through a `res` serialiser. Overriding `res`
+               * replaces pino-http's own, and pino's base one reports `statusCode: null` unless
+               * `headersSent` is set — so the tidier-looking fix silently degraded every response
+               * line in the application to answer `null`. The cost here is that a redirect's target
+               * never appears in a log; this application has exactly two redirecting routes and
+               * both are these, so there is nothing else to lose.
+               */
+              'res.headers.location',
             ],
             remove: true,
+          },
+          /*
+           * `redact` above covers the parsed `req.query`, but the raw URL is a single string and a
+           * path expression cannot reach inside it — so the query has to be cut out here. Wrapped
+           * rather than replaced: `wrapRequestSerializer` runs pino-http's own serialiser first, so
+           * `id`, `method`, `headers` and the rest survive and only the URL is rewritten.
+           *
+           * There is deliberately **no `res` serialiser** beside it; see `res.headers.location`.
+           */
+          serializers: {
+            req: stdSerializers.wrapRequestSerializer((request: SerializedRequest) =>
+              typeof request.url === 'string'
+                ? { ...request, url: scrubRequestUrl(request.url) }
+                : request,
+            ),
           },
           transport:
             config.get('NODE_ENV', { infer: true }) === 'production'

@@ -451,3 +451,91 @@ new production dependency: `res.cookie` is native Express, so `cookie-parser` wa
 ten-line header reader. Verified against a live database — rotation, replay killing the family,
 indistinguishable 401s, logout revoking for real, ten rotations leaving the ceiling unchanged, and
 no cookie value in the logs at `LOG_LEVEL=debug`.]
+
+## Google sign-in — OAuth 2.0 + OpenID Connect
+
+`Title`: Add server-side OIDC Authorization Code Flow with PKCE alongside password authentication
+
+`User prompt`: Review the existing authentication system and prepare a detailed implementation plan
+for adding OAuth 2.0 authentication to the application. Inspect the current backend authentication
+flow, including login, logout, access-token handling, refresh-token handling, session restoration,
+protected routes, user storage, API middleware, cookies, and environment configuration. Identify the
+application's framework, authentication libraries, database structure, deployment environment, and
+any existing OAuth-related code. Determine whether OpenID Connect is also required for user
+authentication and identity information. The plan should cover the recommended OAuth 2.0
+authorization flow, preferably Authorization Code Flow with PKCE where appropriate, the selected
+identity providers, redirect and callback routes, state and nonce validation, PKCE generation and
+verification, secure token exchange, user profile retrieval, account creation and linking, handling
+users with the same email address, access-token and refresh-token storage, token rotation, logout
+and provider revocation, protected API access, error handling, CSRF protection, XSS risks, cookie
+security, required scopes, environment variables, database changes, and provider configuration.
+Include the API endpoints required, database migrations, security considerations, testing strategy,
+and rollout approach. Do not generate or change application code until the plan has been reviewed
+and approved.
+
+[Settled: **server-side confidential-client flow** rather than SPA-side PKCE, so `client_secret`
+never leaves the server and the browser never holds a code, verifier or provider token; **Google
+only**; **auto-link an existing account only when `email_verified` is true**; **link/unlink
+management in scope**. PKCE `S256` is applied despite the client secret, because OAuth 2.1 / RFC 9700
+require it universally — it defends against code injection, which a secret does not.]
+
+[Collided with ADR-008's recorded deferral of social login and with `week_plan.md`'s out-of-scope
+list. Raised as a decision conflict and confirmed. Recorded as **ADR-008a** rather than an ADR-008
+revision: the session layer is untouched, and that is enforced rather than hoped for — the callback
+calls the same `AuthService.startSession()` as `login`, so rotation, reuse detection, the ceiling and
+`JwtGuard` are all unmodified. ADR-008 had already specified this exact path (*"a new
+`auth_identities` table and a new controller action"*), so the ADR records a deferral ending, not a
+choice reversing.]
+
+[**Zero new production dependencies**, which was the deciding factor on flow shape. The exchange is a
+server-to-server call over TLS authenticated with `client_secret`, so OIDC Core §3.1.3.7 permits
+validating the ID token's claims without fetching JWKS or verifying its signature — removing the only
+requirement that would have needed `openid-client` or `jose`. Global `fetch`, `node:crypto` and the
+already-present `@nestjs/jwt` cover the rest. No provider token is stored at all: `access_type=online`
+means none is issued, so there is no rotation, encryption-at-rest or revocation story to build.]
+
+[One defect identified during planning and scheduled into the phase that creates it, not after:
+`pino-http` logs `req.url`, and the callback URL carries `?code=…&state=…`, so every successful
+sign-in would write a live authorization code into the application log. Recorded as CONTRACT.md §9.5.]
+
+## Google sign-in — governance before implementation
+
+`Title`: Update governance, architecture, contract, and prompt history before any OAuth code is written
+
+`User prompt`: Review the complete OAuth 2.0 + OpenID Connect (Google) Implementation Plan. Do not
+modify application code, backend services, Prisma schema, migrations, environment files,
+dependencies, or tests during this task. The objective is to update the project's governance,
+architecture, contract, and prompt-history files so that the Google OAuth implementation can begin
+without contradicting existing recorded decisions.
+
+[Phase O0, executed as documentation only — no schema, migration, service, or `.env` file was
+touched. `backend_architecture.md` gains ADR-008a in full (options, decision, impact, revisit-when)
+plus amendments to ADR-008's rejected-OAuth option, its "separation worth stating explicitly"
+paragraph, and ADR-009's "social login as the recovery path" line, which is **still rejected** —
+`set-password` is a stopgap for a different population, not password reset shipping early.]
+
+## Google sign-in — backend implementation (O1 + O2)
+
+`Title`: Implement the Google OAuth 2.0 + OIDC backend, entirely server-driven
+
+`User prompt`: Implement the Evergrove Google OAuth 2.0 and OpenID Connect backend exactly
+according to oauth_implementation_plan.md. Before writing implementation code, confirm that the
+earlier decision to defer social login has been formally superseded, preserve the historical
+decision rather than deleting it, and ensure every new endpoint, request shape, response shape,
+status code, error code, authentication requirement, and redirect behaviour is documented in
+CONTRACT.md. Implement Google as the only supported provider. Keep the OAuth flow entirely
+backend-driven: the backend must generate the authorization request, receive Google's callback,
+exchange the authorization code, validate the OpenID Connect identity, resolve the Evergrove
+account, create or link the identity, create the normal Evergrove session, and redirect the browser
+back to the frontend.
+
+[Phases O1 and O2. `auth_identities` plus a nullable `users.password_hash`; `domain/oauth.ts` for
+PKCE, `state`/`nonce`, ID-token claim validation and profile derivation; three services and one
+controller for the two redirect routes; `GET /auth/providers`; and the §9.7 logging fix, which was a
+live defect rather than hardening — `pino-http` logs `req.url`, and the callback URL carries a
+redeemable authorization code. **Zero new production dependencies**: `node:crypto` for PKCE, global
+`fetch` for the exchange, `@nestjs/jwt` for the transaction cookie, and no signature check on the ID
+token because it arrives over a TLS-authenticated back-channel (OIDC Core §3.1.3.7). The session
+layer is untouched — the callback calls the same `AuthService.startSession()` the password path
+does, which is the property ADR-008a was built to preserve. Link management (§4.14–§4.17) stays in
+O4, so the link branch of §4.12.1 is specified but not yet reachable.]

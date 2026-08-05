@@ -18,6 +18,7 @@ import type { DeviceContext } from '../common/types/auth-session.types';
 import type { AuthContext, UserProfile } from '../common/types/user.types';
 import { readCookie, refreshCookieOptions } from '../common/utils/cookies';
 import type { Env } from '../config/env.schema';
+import { OAUTH_PROVIDERS, type OAuthProvider } from '../domain/oauth';
 import {
   type ChangePasswordDto,
   type LoginDto,
@@ -31,8 +32,10 @@ import { ZodValidationPipe } from '../pipes/zod-validation.pipe';
 import { AuthService, type AuthResult } from '../services/auth.service';
 
 /*
- * HTTP only. Parses, delegates, writes the response — no rules live here. This is also the only
- * file in the application that reads or writes a cookie.
+ * HTTP only. Parses, delegates, writes the response — no rules live here. This and
+ * `oauth.controller.ts` are the only two files in the application that read or write a cookie, and
+ * both take the *attributes* from `common/utils/cookies.ts` rather than restating them, so the pair
+ * cannot drift into setting one cookie the browser then refuses to send back.
  *
  * Every successful authentication answers with the same three body fields **and** a `Set-Cookie`
  * (ADR-008 rev. 3). The split is deliberate: the access token travels in the body because a script
@@ -69,6 +72,7 @@ function deviceOf(request: Request): DeviceContext {
 export class AuthController {
   private readonly cookieName: string;
   private readonly isProduction: boolean;
+  private readonly oauthEnabled: boolean;
 
   constructor(
     private readonly auth: AuthService,
@@ -76,6 +80,7 @@ export class AuthController {
   ) {
     this.cookieName = config.get('SESSION_COOKIE_NAME', { infer: true });
     this.isProduction = config.get('NODE_ENV', { infer: true }) === 'production';
+    this.oauthEnabled = config.get('OAUTH_ENABLED', { infer: true });
   }
 
   /** The presented refresh token, or null. The one place the cookie is read. */
@@ -163,6 +168,18 @@ export class AuthController {
       this.clearSessionCookie(response);
       throw error;
     }
+  }
+
+  /**
+   * Which sign-in methods this deployment offers.
+   *
+   * **Unguarded** (§4 preamble): the login page needs the answer before anyone is signed in. It
+   * carries no user data, and returns an empty list when `OAUTH_ENABLED` is false — which is what
+   * makes the rollout switch usable rather than a way to ship a button that 404s (§4.13).
+   */
+  @Get('providers')
+  providers(): { providers: readonly OAuthProvider[] } {
+    return { providers: this.oauthEnabled ? OAUTH_PROVIDERS : [] };
   }
 
   /** The profile of the bearer of the presented access token. */

@@ -45,6 +45,38 @@ export function refreshCookieOptions(isProduction: boolean): CookieOptions {
 }
 
 /**
+ * The OAuth transaction cookie (ADR-008a). Same discipline as the refresh cookie: scoped so it is
+ * simply **absent** from every request that does not need it, which here is all but two routes.
+ */
+export const OAUTH_COOKIE_NAME = 'evergrove_oauth';
+
+export const OAUTH_COOKIE_PATH = '/api/v1/auth/oauth';
+
+/** Ten minutes. A consent screen a user leaves open longer than that is an abandoned attempt. */
+export const OAUTH_COOKIE_TTL_MS = 600_000;
+
+/**
+ * Attributes for the transaction cookie, and the same ones must be used to clear it.
+ *
+ * **`sameSite: 'lax'` is load-bearing here, and `'strict'` would be a silent, total failure.** The
+ * provider's callback arrives as a cross-site *top-level GET navigation*: `Lax` sends the cookie on
+ * exactly that, and `Strict` withholds it. Every sign-in would then fail with a state mismatch, on
+ * every browser, with nothing in any log explaining why — the request simply arrives without the
+ * cookie it was issued moments earlier.
+ *
+ * `secure` follows the environment for the same reason `refreshCookieOptions` does: WebKit refuses
+ * to store `Secure` cookies on `http://localhost` and fails by never storing them at all.
+ */
+export function oauthCookieOptions(isProduction: boolean): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: OAUTH_COOKIE_PATH,
+  };
+}
+
+/**
  * Pull one cookie out of a raw `Cookie` header.
  *
  * @returns the decoded value, or null when the header is absent or has no such cookie.
