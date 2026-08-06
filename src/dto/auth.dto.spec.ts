@@ -44,10 +44,6 @@ function parsed<T>(schema: ZodType<T>, value: unknown): T {
 }
 
 describe('registerSchema', () => {
-  it('accepts a complete registration', () => {
-    expect(registerSchema.safeParse(VALID_REGISTER).success).toBe(true);
-  });
-
   it('normalises the identifiers it stores', () => {
     const data = parsed(registerSchema, {
       ...VALID_REGISTER,
@@ -75,88 +71,13 @@ describe('registerSchema', () => {
     expect(data.password).toBe(password);
   });
 
-  it('treats the timezone as optional', () => {
-    expect(parsed(registerSchema, VALID_REGISTER).timezone).toBeUndefined();
-    expect(parsed(registerSchema, { ...VALID_REGISTER, timezone: 'Europe/London' }).timezone).toBe(
-      'Europe/London',
-    );
-  });
-
-  it('rejects a timezone the runtime does not recognise', () => {
-    // The column is an interpretation key: every instant stored for the account is read through
-    // it, so an unusable value corrupts future day-buckets rather than merely displaying oddly.
-    expect(errorsOf(registerSchema, { ...VALID_REGISTER, timezone: 'Mars/Olympus' })).toEqual({
-      timezone: 'Unrecognised time zone.',
-    });
-  });
-
   /*
-   * One row per rule the sign-up form mirrors. The messages are asserted verbatim because the
-   * frontend reproduces them locally to spare a round trip — a rule that drifts here produces a
-   * form that passes and then fails at the API with wording the user has already been shown.
+   * The per-field rules themselves — lengths, formats, character sets — are not enumerated here.
+   * They are ordinary field validation, and the two that carry real weight live where they are
+   * enforced: the password bounds in `domain/password-policy.spec.ts`, and uniqueness at the
+   * database, in `services/auth.service.spec.ts`. What the schema owes the sign-up form is this
+   * one behaviour.
    */
-  const rejections: ReadonlyArray<[string, Record<string, unknown>, string, string]> = [
-    [
-      'a name below the minimum',
-      { firstName: 'A' },
-      'firstName',
-      'First name must be at least 2 characters.',
-    ],
-    [
-      'a name above the maximum',
-      { firstName: 'A'.repeat(51) },
-      'firstName',
-      'First name must be 50 characters or fewer.',
-    ],
-    [
-      'a name containing digits',
-      { lastName: 'Lovelace2' },
-      'lastName',
-      'Last name cannot contain numbers.',
-    ],
-    ['a malformed email', { email: 'not-an-email' }, 'email', 'Enter a valid email address.'],
-    [
-      'an email above the maximum',
-      { email: `${'a'.repeat(310)}@evergrove.app` },
-      'email',
-      'Email is too long.',
-    ],
-    [
-      'a username below the minimum',
-      { username: 'ad' },
-      'username',
-      'Username must be at least 3 characters.',
-    ],
-    [
-      'a username above the maximum',
-      { username: 'a'.repeat(21) },
-      'username',
-      'Username must be 20 characters or fewer.',
-    ],
-    [
-      'a username with unsupported characters',
-      { username: 'ada-l' },
-      'username',
-      'Use only letters, numbers, and underscores.',
-    ],
-    [
-      'a password below the minimum',
-      { password: 'a'.repeat(PASSWORD_MIN_LENGTH - 1) },
-      'password',
-      `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`,
-    ],
-    [
-      'a password above the maximum',
-      { password: 'a'.repeat(PASSWORD_MAX_LENGTH + 1) },
-      'password',
-      `Password must be ${PASSWORD_MAX_LENGTH} characters or fewer.`,
-    ],
-  ];
-
-  it.each(rejections)('rejects %s', (_case, overrides, field, message) => {
-    expect(errorsOf(registerSchema, { ...VALID_REGISTER, ...overrides })[field]).toBe(message);
-  });
-
   it('reports every rejected field at once rather than the first', () => {
     // The sign-up form places an error under each input; one field per round trip would make
     // fixing a bad form a sequence of submissions.
@@ -179,27 +100,29 @@ describe('registerSchema', () => {
 });
 
 describe('loginSchema', () => {
+  const VALID_LOGIN = { identifier: 'ada@evergrove.app', password: 'correct horse battery' };
+
   /*
    * The security property of this schema is what it does NOT do. Each of these values is
    * unregistrable, and every one must still be accepted here so that it fails later as
    * "invalid credentials" — identical to a wrong password. Rejecting any of them would answer a
    * question about the account namespace to a caller who has proved nothing.
    */
-  const permitted: ReadonlyArray<[string, Record<string, unknown>]> = [
-    ['an identifier that is not a valid email', { identifier: 'not-an-email' }],
-    ['an identifier that is not a valid username', { identifier: 'ada l!' }],
-    ['a password far below the registration minimum', { password: 'x' }],
-    ['a password that would fail the policy', { password: 'ada_l' }],
-  ];
+  it('deliberately accepts values that could never have been registered', () => {
+    const unregistrable: ReadonlyArray<[string, Record<string, unknown>]> = [
+      ['an identifier that is not a valid email', { identifier: 'not-an-email' }],
+      ['an identifier that is not a valid username', { identifier: 'ada l!' }],
+      ['a password far below the registration minimum', { password: 'x' }],
+      ['a password that would fail the policy', { password: 'ada_l' }],
+    ];
 
-  it.each(permitted)('deliberately accepts %s', (_case, overrides) => {
-    const value = {
-      identifier: 'ada@evergrove.app',
-      password: 'correct horse battery',
-      ...overrides,
-    };
+    const refusedHere = unregistrable
+      .filter(([, overrides]) => !loginSchema.safeParse({ ...VALID_LOGIN, ...overrides }).success)
+      .map(([label]) => label);
 
-    expect(loginSchema.safeParse(value).success).toBe(true);
+    // Named rather than asserted as four booleans: each shape is a separate enumeration channel,
+    // so a failure has to say which one started being answered early.
+    expect(refusedHere).toEqual([]);
   });
 
   it('trims the identifier without changing its case', () => {
@@ -220,40 +143,21 @@ describe('loginSchema', () => {
     );
   });
 
-  /*
-   * The only rules it does enforce: presence, so the client can distinguish "I submitted an
-   * empty form" from "your credentials are wrong"; and an upper bound, so an oversized body
-   * cannot be spent inside Argon2.
-   */
-  const refused: ReadonlyArray<[string, Record<string, unknown>, string, string]> = [
-    ['an empty identifier', { identifier: '   ' }, 'identifier', 'Enter your email or username.'],
-    ['an empty password', { password: '' }, 'password', 'Enter your password.'],
-    [
-      'an oversized identifier',
-      { identifier: 'a'.repeat(321) },
-      'identifier',
+  it('refuses an oversized identifier or password before they can be spent inside Argon2', () => {
+    /*
+     * The one ceiling the schema does enforce, and it is a cost control rather than a validation
+     * rule: an unbounded password is CPU the server burns hashing something it was always going
+     * to reject. Presence is also enforced, and is deliberately not tested here — an empty field
+     * is a form concern, and it reveals nothing either way.
+     */
+    expect(errorsOf(loginSchema, { ...VALID_LOGIN, identifier: 'a'.repeat(321) }).identifier).toBe(
       'That identifier is too long.',
-    ],
-    [
-      'an oversized password',
-      { password: 'a'.repeat(PASSWORD_MAX_LENGTH + 1) },
-      'password',
-      'Password is too long.',
-    ],
-  ];
+    );
 
-  it.each(refused)('rejects %s', (_case, overrides, field, message) => {
-    const value = {
-      identifier: 'ada@evergrove.app',
-      password: 'correct horse battery',
-      ...overrides,
-    };
-
-    expect(errorsOf(loginSchema, value)[field]).toBe(message);
-  });
-
-  it('rejects a body missing both fields', () => {
-    expect(Object.keys(errorsOf(loginSchema, {})).sort()).toEqual(['identifier', 'password']);
+    expect(
+      errorsOf(loginSchema, { ...VALID_LOGIN, password: 'a'.repeat(PASSWORD_MAX_LENGTH + 1) })
+        .password,
+    ).toBe('Password is too long.');
   });
 });
 

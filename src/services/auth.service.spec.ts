@@ -1,7 +1,7 @@
 import type { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ProblemException } from '../common/errors/problem.exception';
+import { ProblemException, type FieldError } from '../common/errors/problem.exception';
 import type { Clock } from '../common/ports/clock.port';
 import { PasswordHasher } from '../common/ports/password-hasher.port';
 import type { AuthContext, UserRecord } from '../common/types/user.types';
@@ -163,11 +163,21 @@ describe('AuthService', () => {
       password: 'correct horse battery staple',
     };
 
-    it('accepts an email identifier', async () => {
+    it('signs in with correct credentials and hands back the account, never its credential', async () => {
       const result = await service.login(CREDENTIALS, DEVICE);
 
-      expect(result.profile.username).toBe('Ada_L');
       expect(users.findByEmail).toHaveBeenCalledWith('ada@evergrove.app');
+      expect(result.profile.id).toBe('user-1');
+      expect(result.profile.username).toBe('Ada_L');
+
+      // The password was actually checked against the stored hash. A success that never reached
+      // the hasher is a success that let anyone in.
+      expect(hasher.verifications).toBe(1);
+
+      // And the hash does not travel back out — asserted by value as well as by key, because a
+      // profile that leaked it under some other name would still pass the property check.
+      expect(result.profile).not.toHaveProperty('passwordHash');
+      expect(Object.values(result.profile)).not.toContain('hashed:correct horse battery staple');
     });
 
     it('accepts a username identifier in any casing', async () => {
@@ -176,13 +186,6 @@ describe('AuthService', () => {
       expect(result.profile.id).toBe('user-1');
       expect(users.findByUsernameKey).toHaveBeenCalledWith('ada_l');
       expect(users.findByEmail).not.toHaveBeenCalled();
-    });
-
-    it('never returns the credential material in the profile', async () => {
-      const result = await service.login(CREDENTIALS, DEVICE);
-
-      expect(Object.values(result.profile)).not.toContain('hashed:correct horse battery staple');
-      expect(result.profile).not.toHaveProperty('passwordHash');
     });
 
     it('answers with an access token that names the user and nothing else', async () => {
@@ -201,8 +204,8 @@ describe('AuthService', () => {
       expect(Object.keys(claims).sort()).toEqual(['aud', 'exp', 'iat', 'iss', 'sub']);
     });
 
-    it('records the sign-in and opens a refresh session', async () => {
-      await service.login(CREDENTIALS, DEVICE);
+    it('records the sign-in and opens a refresh session the cookie can carry', async () => {
+      const result = await service.login(CREDENTIALS, DEVICE);
 
       expect(authSessions.create).toHaveBeenCalledTimes(1);
 
@@ -210,6 +213,20 @@ describe('AuthService', () => {
       // looks up and what logout revokes, while last_login_at is the account-level fact that
       // survives the session being revoked, expiring, or purged.
       expect(users.markLogin).toHaveBeenCalledWith('user-1', NOW);
+
+      /*
+       * The other half of the contract (§4.9): a sign-in is not complete without the refresh
+       * token bound for the `Set-Cookie`, and its lifetime is the session's idle window rather
+       * than the access token's. A login that returned only an access token would leave the
+       * client signed out fifteen minutes later with nothing to renew from.
+       */
+      expect(result.refresh.token).toBeTruthy();
+      expect(result.refresh.expiresAt).toEqual(new Date(NOW.getTime() + ENV.SESSION_IDLE_TTL_MS));
+
+      // What the row keeps is a digest. If the plaintext were stored, a database read would be
+      // equivalent to holding every live session on the deployment.
+      const [row] = vi.mocked(authSessions.create).mock.calls[0];
+      expect(JSON.stringify(row)).not.toContain(result.refresh.token);
     });
 
     it('gives an unknown account the same answer, and the same work, as a wrong password', async () => {
@@ -283,23 +300,47 @@ describe('AuthService', () => {
       password: 'correct horse battery staple',
     };
 
-    it('stores the display username alongside its lowercase uniqueness key', async () => {
-      await service.register({ ...SIGNUP, timezone: 'Europe/London' }, DEVICE);
+    it('persists the new account with its uniqueness key, a usable timezone, and a hashed password', async () => {
+      await service.register(SIGNUP, DEVICE);
 
-      expect(createdUsers[0]).toMatchObject({ username: 'Ada_L', usernameLower: 'ada_l' });
-    });
+      expect(createdUsers).toHaveLength(1);
+      expect(createdUsers[0]).toMatchObject({
+        email: 'ada@evergrove.app',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        // Display casing is kept; the lowercase key beside it is what carries the UNIQUE index,
+        // so uniqueness is case-insensitive without a citext column.
+        username: 'Ada_L',
+        usernameLower: 'ada_l',
+        // Falls back rather than being left empty when the client could not determine one: every
+        // instant stored for this account is later read through this column.
+        timezone: 'UTC',
+      });
 
-    it('defaults the timezone when the client could not determine one', async () => {
-      await service.register({ ...SIGNUP, username: 'ada_l' }, DEVICE);
-
-      expect(createdUsers[0]?.timezone).toBe('UTC');
+      /*
+       * The security requirement of the whole flow: what reaches the database is a hash, and the
+       * password the user typed exists nowhere in the row. Asserted as a negative *and* a
+       * positive — the negative is what a regression would trip, the positive pins that the value
+       * came from the hasher rather than from some other transform of the plaintext.
+       */
+      expect(createdUsers[0]?.passwordHash).not.toBe(SIGNUP.password);
+      expect(createdUsers[0]?.passwordHash).toBe('hashed:correct horse battery staple');
     });
 
     it('signs the new account in rather than making it log in again', async () => {
       const result = await service.register(SIGNUP, DEVICE);
 
-      expect(result.accessToken).toBeTruthy();
+      // Registration ends at the same startSession() as a sign-in, so it answers with both
+      // credentials: the access token the client attaches to its next request...
+      expect(claimsOf(result.accessToken).sub).toBe(result.profile.id);
       expect(result.accessTokenExpiresIn).toBe(8 * HOUR);
+
+      // ...and the refresh token bound for the HttpOnly cookie, with a session row behind it.
+      // Without this half, a user who just signed up is silently ejected when the access token
+      // expires and has to type the credential they only just chose.
+      expect(authSessions.create).toHaveBeenCalledTimes(1);
+      expect(result.refresh.token).toBeTruthy();
+      expect(result.refresh.expiresAt).toEqual(new Date(NOW.getTime() + ENV.SESSION_IDLE_TTL_MS));
     });
 
     it('rejects a password containing the username before touching the database', async () => {
@@ -310,18 +351,41 @@ describe('AuthService', () => {
       expect(users.create).not.toHaveBeenCalled();
     });
 
-    it('reports a taken email or username as field errors', async () => {
-      conflicts = ['email', 'username'];
+    /*
+     * The three ways an otherwise valid registration is refused. Each is reported by the *database*
+     * — the repository surfaces the unique-constraint violation — rather than by a pre-check, which
+     * is what makes it correct under two simultaneous sign-ups for the same handle.
+     */
+    const takenCases: ReadonlyArray<[string, ReadonlyArray<'email' | 'username'>, FieldError[]]> = [
+      [
+        'an email that is already registered',
+        ['email'],
+        [{ field: 'email', message: 'An account with this email already exists.' }],
+      ],
+      [
+        'a username that is already taken',
+        ['username'],
+        [{ field: 'username', message: 'That username is already taken.' }],
+      ],
+      [
+        'both at once, in a single response',
+        ['email', 'username'],
+        [
+          { field: 'email', message: 'An account with this email already exists.' },
+          { field: 'username', message: 'That username is already taken.' },
+        ],
+      ],
+    ];
+
+    it.each(takenCases)('refuses %s', async (_case, taken, expected) => {
+      conflicts = [...taken];
 
       const error = (await service
-        .register({ ...SIGNUP, username: 'ada_l' }, DEVICE)
+        .register(SIGNUP, DEVICE)
         .catch((caught: unknown) => caught)) as ProblemException;
 
       expect(error.problem.status).toBe(409);
-      expect(error.problem.errors).toEqual([
-        { field: 'email', message: 'An account with this email already exists.' },
-        { field: 'username', message: 'That username is already taken.' },
-      ]);
+      expect(error.problem.errors).toEqual(expected);
     });
   });
 

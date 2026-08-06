@@ -10,9 +10,9 @@ export default defineConfig({
     // E2E boots the real application against a real database; parallel files would race
     // on the same schema.
     fileParallelism: false,
-    // Same reason as vitest.config.ts: no e2e specs exist yet, and the opt-in pre-push run
-    // must not fail on an empty suite. Remove once the first e2e spec lands.
-    passWithNoTests: true,
+    // `test/auth.e2e-spec.ts` is the first spec here, so an empty run is now a sign the glob or
+    // the file went missing rather than a phase that has not been reached yet.
+    passWithNoTests: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },
