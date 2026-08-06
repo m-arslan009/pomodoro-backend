@@ -165,6 +165,26 @@ export class SessionRepository {
     return { sessions: items.map(toRecord), nextCursor };
   }
 
+  /**
+   * Every session an account ended inside an instant window, oldest first.
+   *
+   * For the report worker (CONTRACT.md §24.2). It takes INSTANTS, not local dates, and the caller
+   * pads the window generously: period membership is decided by the local date of `endedAt` in the
+   * account's own timezone, and expressing that as a SQL predicate would need a timezone expression
+   * per row — which is exactly the raw-SQL aggregation §23.0 A3 refuses. Padding by two days
+   * comfortably covers every real UTC offset (±14h) and costs a handful of extra rows for one user.
+   *
+   * Returns the raw window; the pure fold in `domain/report.ts` decides what is in the period.
+   */
+  async findEndedBetween(userId: string, from: Date, to: Date): Promise<SessionRecord[]> {
+    const rows = await this.prisma.focusSession.findMany({
+      where: { userId, endedAt: { gte: from, lte: to } },
+      orderBy: { endedAt: 'asc' },
+      select: SESSION_FIELDS,
+    });
+    return rows.map(toRecord);
+  }
+
   /** The projection, or a zeroed one when the account has never recorded anything. */
   async getGamification(userId: string): Promise<GamificationState> {
     const row = await this.prisma.userGamification.findUnique({ where: { userId } });

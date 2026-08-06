@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import type { Env } from './config/env.schema';
+import type { RawBodyRequest } from './common/types/raw-body-request';
 import { ProblemDetailsFilter } from './filters/problem-details.filter';
 
 async function bootstrap(): Promise<void> {
@@ -22,7 +23,23 @@ async function bootstrap(): Promise<void> {
   const isProduction = config.get('NODE_ENV', { infer: true }) === 'production';
 
   app.use(helmet());
-  app.use(json({ limit: config.get('BODY_LIMIT', { infer: true }) }));
+  app.use(
+    json({
+      limit: config.get('BODY_LIMIT', { infer: true }),
+      /*
+       * Keep the exact bytes for the mail provider's webhook (§25.6).
+       *
+       * A Svix signature is computed over the RAW body. `JSON.parse` followed by
+       * `JSON.stringify` is not the same string — key order, whitespace and number formatting can
+       * all differ — so verifying against a re-serialised body fails for legitimate requests and,
+       * worse, would tempt someone to "fix" it by not verifying at all. This is the only way to
+       * check a signature honestly, and it costs one Buffer reference per request.
+       */
+      verify: (request, _response, buffer) => {
+        (request as RawBodyRequest).rawBody = Buffer.from(buffer);
+      },
+    }),
+  );
 
   // /health stays off the versioned prefix so uptime checks survive an API version bump.
   app.setGlobalPrefix('api/v1', { exclude: ['health'] });

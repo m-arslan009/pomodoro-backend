@@ -18,13 +18,19 @@ import { TaskModule } from './task.module';
  * TaskModule is imported for one question — does this task belong to this account — so the session
  * recorder never touches the tasks table itself.
  *
- * GamificationService is exported for the `gamification:rebuild` command. SessionRepository is not
- * exported: nothing outside this module may write the log or the projection.
+ * GamificationService is exported for the `gamification:rebuild` command.
+ *
+ * SessionRepository is exported **for reads only** (added 2026-08-06, R4). The report worker has to
+ * fold a period out of the event log, and ADR-020 gives each table exactly one component that
+ * touches it — so the alternative was a second repository over `focus_sessions`, which is the thing
+ * that rule exists to prevent. The original intent stands as convention: nothing outside this module
+ * may *write* the log or the projection, and `ReportModule` calls exactly two methods,
+ * `findEndedBetween` and `getGamification`, both of which are reads.
  */
 @Module({
   imports: [AuthModule, TaskModule],
   controllers: [SessionController, GamificationController],
   providers: [SessionService, GamificationService, SessionRepository],
-  exports: [GamificationService],
+  exports: [GamificationService, SessionRepository],
 })
 export class SessionModule {}

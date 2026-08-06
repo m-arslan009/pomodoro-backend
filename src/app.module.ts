@@ -9,6 +9,7 @@ import { HealthController } from './controllers/health.controller';
 import { type Env, validateEnv } from './config/env.schema';
 import { PrismaModule } from './database/prisma.module';
 import { AuthModule } from './modules/auth.module';
+import { ReportModule } from './modules/report.module';
 import { SessionModule } from './modules/session.module';
 import { SettingsModule } from './modules/settings.module';
 import { TaskModule } from './modules/task.module';
@@ -119,6 +120,7 @@ interface SerializedRequest {
     SettingsModule,
     TaskModule,
     SessionModule,
+    ReportModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -85,8 +85,9 @@ model User {
   tasks        Task[]
   sessions     FocusSession[]
   gamification UserGamification?
-  authSessions AuthSession[]
-  identities   AuthIdentity[]
+  authSessions       AuthSession[]
+  identities         AuthIdentity[]
+  reportSubscription ReportSubscription?
 
   @@map("users")
 }
@@ -370,4 +371,157 @@ model UserGamification {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_gamification")
+}
+
+/// A user's standing answer to "would you like reports by email?" (CONTRACT.md §23.1).
+///
+/// ONE ROW MEANS THE QUESTION HAS BEEN ANSWERED. Its absence means it never has, and the two are
+/// kept apart deliberately: `declined` is an answer, no row is silence, and only telling them apart
+/// lets the one-time invitation know whether it has already had its turn (§23.0 consequence 3). A
+/// Google-created account has no row until it opens Settings, because the OAuth callback has no form
+/// to answer.
+///
+/// `status` is 'pending_confirmation' | 'active' | 'paused' | 'declined' | 'unsubscribed' |
+/// 'bounced', pinned by a CHECK constraint — VarChar rather than a Prisma enum, matching this
+/// schema's existing refusal elsewhere. `declined` and `unsubscribed` both mean "off" and are
+/// separate on purpose: one is an answer given before anything was sent, the other is an answer
+/// given by somebody who was receiving reports and stopped.
+///
+/// THERE IS NO TIMEZONE COLUMN, AND THAT IS LOAD-BEARING. `users.timezone` is the single
+/// interpretation key (§1.3) — write-once at signup, and the value every `focus_sessions`
+/// `attribution_date` was already decided against. A second copy here could drift from it, and a
+/// report bucketed one way while the app buckets another is the one defect this feature cannot
+/// explain away. Periods and delivery times read the user row (§23.0 consequence 1).
+model ReportSubscription {
+  id     String @id @default(uuid(7)) @db.Uuid
+  /// One subscription per account. Unique rather than the primary key so `report_deliveries` has a
+  /// stable id to reference that survives the user re-subscribing.
+  userId String @unique @map("user_id") @db.Uuid
+
+  /// Retained while switched off, so re-enabling restores the previous answer rather than asking
+  /// again. Meaningless while `status` is declined, unsubscribed, or bounced — read it with the
+  /// status, never alone.
+  frequency String @db.VarChar(16)
+  status    String @db.VarChar(24)
+
+  /// 1 = Monday … 7 = Sunday, for weekly subscriptions. Ignored by monthly ones, which are always
+  /// the 1st. Read by the worker's selection query, which is what stops it being a column nobody
+  /// consumes.
+  deliveryDay Int @default(1) @map("delivery_day") @db.SmallInt
+
+  /// Set by the soft-bounce rule (§25.6). `status` is the authority on whether reports are paused;
+  /// this is only when the pause may lift.
+  pausedUntil DateTime? @map("paused_until") @db.Timestamptz(3)
+
+  /// Non-null once the address has ever been confirmed. Not cleared by unsubscribing — the address
+  /// stayed proven, so re-subscribing later does not have to prove it twice.
+  confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
+
+  /// SHA-256 of the outstanding confirmation token, or null when none is (§23.3). Single-use:
+  /// confirming clears it in the same statement that sets `status = 'active'`.
+  confirmationTokenHash String?   @map("confirmation_token_hash") @db.VarChar(64)
+  confirmationExpiresAt DateTime? @map("confirmation_expires_at") @db.Timestamptz(3)
+
+  /// SHA-256 of the unsubscribe token. Long-lived and deliberately not expiring — an unsubscribe
+  /// link in a year-old email that had stopped working would be a link that lied.
+  unsubscribeTokenHash String @map("unsubscribe_token_hash") @db.VarChar(64)
+
+  /// Reset to zero by any successful delivery. At SOFT_BOUNCE_LIMIT the subscription pauses.
+  consecutiveSoftBounces Int       @default(0) @map("consecutive_soft_bounces") @db.SmallInt
+  lastBounceAt           DateTime? @map("last_bounce_at") @db.Timestamptz(3)
+
+  /// The cheap read for "have we already covered this period?". `report_deliveries` remains the
+  /// authority — this is a denormalisation for the selection query, not a second source of truth.
+  lastDeliveredPeriodStart DateTime? @map("last_delivered_period_start") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries ReportDelivery[]
+
+  /// Exactly the shape of the worker's hourly selection: the deliverable statuses, then the
+  /// frequency, then the day that decides whether this is the account's morning.
+  @@index([status, frequency, deliveryDay])
+  @@map("report_subscriptions")
+}
+
+/// One attempt at one period — the delivery ledger (CONTRACT.md §23.2).
+///
+/// THE UNIQUE CONSTRAINT IS THE IDEMPOTENCY DESIGN (A7). With no queue, the worker's safety comes
+/// from the database: a second tick inside the same hour finds this row and does nothing, so a cron
+/// provider that fires twice, or a deploy that overlaps a run, cannot mail the same report twice.
+///
+/// A row is written BEFORE the document is rendered, not after. A crash mid-render then leaves a
+/// `pending` row the next tick can see and retry, rather than no evidence that anything was started.
+///
+/// `status` is 'pending' | 'sent' | 'failed' | 'retryable' | 'skipped_empty' | 'abandoned', pinned
+/// by a CHECK constraint. `skipped_empty` is a real outcome, not a failure: a period with no focus
+/// sessions is not sent at all (P7), and recording the decision is what stops the next tick
+/// reconsidering it.
+model ReportDelivery {
+  id             String @id @default(uuid(7)) @db.Uuid
+  subscriptionId String @map("subscription_id") @db.Uuid
+
+  periodKind String @map("period_kind") @db.VarChar(16)
+
+  /// User-local dates, both ends inclusive. Dates rather than instants because a period is a run of
+  /// calendar days in the account's zone, and a DST day is 23 or 25 hours long (§24.2).
+  periodStart DateTime @map("period_start") @db.Date
+  periodEnd   DateTime @map("period_end") @db.Date
+
+  status   String @db.VarChar(16)
+  attempts Int    @default(0) @db.SmallInt
+
+  /// Null unless `status` is 'retryable'. The tick is the retry clock — nothing can run sooner than
+  /// the next hourly pass, which is why the tick is hourly even for a weekly report (§26.3).
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(3)
+
+  /// The provider's id for the accepted message, and the join key a bounce webhook arrives on.
+  providerMessageId String? @map("provider_message_id") @db.VarChar(255)
+
+  /// The provider's own words, truncated. Operational only: it is returned by no endpoint and
+  /// rendered to no user, because it can quote an address or a provider-internal reason.
+  lastError String? @map("last_error") @db.VarChar(500)
+
+  /// The cut-off stamped into the document's footer. A period is frozen at generation and no later
+  /// arrival restates it, so this is the honest answer to "as of when?" (§24.3).
+  generatedAt DateTime? @map("generated_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription ReportSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  /// A7. One attempt row per period per subscription, enforced by Postgres rather than by the
+  /// worker remembering to check.
+  @@unique([subscriptionId, periodKind, periodStart])
+  /// The retry pass.
+  @@index([status, nextAttemptAt])
+  @@map("report_deliveries")
+}
+
+/// One provider webhook event, recorded so it is processed at most once (CONTRACT.md §25.6).
+///
+/// WHY A TABLE RATHER THAN RELYING ON IDEMPOTENT EFFECTS. Most of the effects are naturally
+/// idempotent — setting a subscription to `bounced` twice is the same as once — but the soft-bounce
+/// rule COUNTS, and a provider that retries its webhook (all of them do) would pause a healthy
+/// subscription after one transient bounce delivered three times. The counter is the reason this
+/// exists.
+///
+/// `event_id` is the provider's own message id from the signature header, which is unique per event
+/// and stable across its retries. The insert is the claim: the writer that loses the unique index
+/// knows the event is already handled.
+model ReportWebhookEvent {
+  id      String @id @default(uuid(7)) @db.Uuid
+  eventId String @unique @map("event_id") @db.VarChar(255)
+
+  /// Provider event type, for operators reading the table. Nothing branches on the stored copy.
+  eventType String @map("event_type") @db.VarChar(64)
+
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  /// Swept with the deliveries it describes (L4).
+  @@index([receivedAt])
+  @@map("report_webhook_events")
 }

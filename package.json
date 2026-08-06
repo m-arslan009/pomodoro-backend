@@ -31,7 +31,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "gamification:rebuild": "ts-node -r tsconfig-paths/register src/cli/gamification-rebuild.ts"
+    "gamification:rebuild": "ts-node -r tsconfig-paths/register src/cli/gamification-rebuild.ts",
+    "report:send-test": "nest build && node dist/src/cli/report-send-test.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -47,6 +48,8 @@
     "dotenv": "^17.4.2",
     "helmet": "^8.3.0",
     "nestjs-pino": "^4.6.1",
+    "nodemailer": "^9.0.4",
+    "pdfmake": "^0.3.11",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
@@ -63,6 +66,7 @@
     "@swc/core": "^1.15.46",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "@types/supertest": "^7.2.1",
     "@vitest/coverage-v8": "^4.1.10",
