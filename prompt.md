@@ -539,3 +539,193 @@ token because it arrives over a TLS-authenticated back-channel (OIDC Core §3.1.
 layer is untouched — the callback calls the same `AuthService.startSession()` the password path
 does, which is the property ADR-008a was built to preserve. Link management (§4.14–§4.17) stays in
 O4, so the link branch of §4.12.1 is specified but not yet reachable.]
+
+## Periodic email reporting — proposal before plan
+
+`Title`: Design a periodic email report delivered as a PDF attachment, proposal first
+
+`User prompt`: Examine the Evergrove codebase and project documentation to design and implement a
+periodic email-reporting feature that sends each eligible user a weekly or monthly report as a PDF
+attachment. Do not begin implementation or write a final implementation plan immediately. Before
+planning the implementation, prepare a PDF-format proposal for discussion. Explain exactly what
+information the report could contain based only on data that already exists in the application.
+Propose the document structure, including title page or compact header, reporting-period label,
+summary section, tables, charts, empty-state messaging, page numbers, footer, Evergrove branding,
+locale-aware dates and numbers, timezone display, and accessibility considerations. Compare the
+appropriate server-side PDF-generation approaches available in the existing technology stack, such
+as HTML-to-PDF rendering or a programmatic PDF library, and explain the operational, security,
+deployment, font, styling, performance, and maintenance trade-offs. Do not select a PDF library
+until the existing runtime and deployment restrictions have been examined. The report must not
+depend on loading untrusted remote assets while rendering, and temporary PDF files must not remain
+on disk longer than necessary. Create a dedicated section listing every unresolved, conflicting, or
+non-confirmed product and technical decision that must be answered before implementation. At
+minimum, clarify whether users receive weekly reports, monthly reports, or may choose either; the
+default frequency; whether the feature is opt-in or enabled automatically; who is eligible; where
+the preference is managed; whether users can pause or disable reports; the delivery day and local
+delivery time; how the start of the week is determined; whether monthly reports represent calendar
+months or rolling periods. After presenting the PDF proposal and unresolved-decision register, stop
+and request explicit confirmation. Do not silently choose defaults for disputed or unspecified
+behaviour. Once the decisions have been confirmed, produce a phased implementation plan before
+changing code. The plan should preserve the current application architecture and include database or
+preference changes, API contracts, scheduler design, report-period calculation, deterministic data
+aggregation, PDF rendering, email composition and attachment delivery, idempotency records, retries,
+observability, security, configuration, migrations, rollout, rollback, and testing.
+
+[Proposal delivered as `email_reporting_proposal.pdf` at the repository root, with its HTML source
+beside it. No application file, schema, dependency, or configuration was touched. The register runs
+to 34 items and three of them are collisions with locked decisions rather than gaps: ADR-014 (no
+load-bearing scheduler — its own revisit trigger names digests), the 2026-07-31 aggregation
+supersession (server-side statistics were deleted, not deferred), and ADR-009's unmade mail-provider
+decision, which blocks sending entirely and must be answered once for both features. `CONTRACT.md`
+§11's `Mailer` port and `POST /auth/forgot-password` remain the shape any provider choice has to fit.]
+
+## Periodic email reporting — six confirmed decisions (A1, A2, A3, P3, P5, L3)
+
+`User prompt`:
+
+A1 — Email provider and mail abstraction. Create a provider-neutral Mailer interface. Use Resend
+through native fetch in production. Use a console adapter in local development. Use a recording fake
+in automated tests. Keep provider-specific features inside the adapter.
+
+A2 — Scheduling and job processing. Use an external scheduler because the application may be asleep.
+The scheduler should start a small report worker. Store pending, successful, failed, and retryable
+deliveries in the database. Do not introduce pg-boss or a managed queue yet. Add a full queue later
+when background jobs become more numerous or complex. Schedule: run daily or weekly if everyone
+receives reports at one global time; run hourly if users receive reports according to their own
+timezone.
+
+A3 — Report calculations. Create a private, pure TypeScript report-calculation module. Fetch the
+required records through the repository. Calculate statistics in application memory. Do not create
+/stats/rollups yet. Do not use SQL aggregation yet. Make the email report and History page follow the
+same counting rules. Test both using the same example fixtures.
+
+P3 — How users enable reports. Reports should not be automatically enabled. During signup, let new
+users choose weekly, monthly, or no email reports. Do not automatically subscribe existing users.
+Show existing users a one-time in-app invitation. Provide controls in Settings. Include unsubscribe
+and change-frequency links in every email.
+
+P5 — Where report preferences are stored. Use a dedicated `report_subscriptions` table storing
+frequency (weekly or monthly), status, delivery day, timezone, pause information, bounce information,
+and confirmation state. Use a separate `report_deliveries` table for individual report deliveries.
+
+L3 — Sending to unverified email addresses. Never send private reports to an unverified
+password-account email. Google users with a Google-confirmed email may activate reports immediately.
+Password users must click a confirmation link before reports begin. Confirmation links must be
+single-use, time-limited, securely generated, and stored as hashes. Build full account email
+verification later as part of password-reset work. Bounce handling: first hard bounce disables the
+subscription immediately; a temporary soft bounce is retried a limited number of times; repeated
+temporary failures pause the subscription.
+
+[These six close register items A1, A2, A3, P3, P5, L3 outright, and settle P1 (user's choice),
+P6 (pause exists), D4 (bounce policy), L2 (unsubscribe link in every email), A9 (re-derive from
+`focus_sessions`) and A10 (the frontend gains signup choice, invitation, Settings controls, and
+confirm/unsubscribe pages) by implication. Three supersessions still need recording before code:
+ADR-014 (a scheduler now exists), the 2026-07-31 aggregation supersession (the server computes
+statistics again, for its own use only), and ADR-009 (the mail provider is chosen — Resend behind the
+`Mailer` port, which unblocks password reset too).]
+
+## Email reports — backend, and `unsubscribed` as a real state
+
+`User prompt`: Implement the backend for the Email Reports feature. Implement the provider-neutral
+Mailer port with a Resend production adapter using native fetch, a console adapter for local
+development, and a recording fake for tests. Add the required validated environment variables.
+Create the documented `report_subscriptions` and `report_deliveries` models, migrations,
+repositories, and services. Do not duplicate the user timezone in the subscription — read
+`users.timezone` when determining report periods and delivery times. Support the documented
+subscription states, including declined, pending confirmation, active, paused, unsubscribed, and
+bounced. Treat a missing subscription row as never asked, not as an error, and ensure the
+preference-read endpoint returns a valid response for users without a row. Allow authenticated users
+to read their preference, choose weekly or monthly, decline or disable, change frequency, resend
+confirmation where allowed, and pause or resume where documented. Write a DECLINED row when the user
+explicitly chooses no reports. For Google accounts with a provider-confirmed address, allow
+activation according to the documented rules. For unverified password accounts, create a pending
+subscription and require the documented single-use, expiring email-confirmation flow before
+activation.
+
+[Phase R1 + R2. Two decisions are settled by this prompt rather than by the plan. **`unsubscribed`
+is now a sixth stored status**, distinct from `declined` — one is an answer given before anything was
+sent, the other an answer given by somebody who was receiving reports and stopped; `CONTRACT.md`
+§23.1's open question is closed accordingly. And **the signup answer moved out of
+`POST /auth/register`** (§25.7 amended): applying it there would have required a circular module
+dependency between AuthModule and ReportModule, and would have put an outbound confirmation email
+inside the transaction creating the account. It is a follow-up `PUT /me/reports` from the client, so
+there is one implementation of the L3 activation rule rather than two. The worker, the aggregation
+and the PDF are still R4/R5 and were not built.]
+
+## Email reports — completing the backend (R4 + R5)
+
+`User prompt`: Complete the remaining backend work for the Email Reports feature — the pure report
+aggregation logic, the shared aggregation fixtures, weekly and monthly totals following the same
+rules as the frontend History feature; the PDF renderer using pdfmake as selected in ADR-021,
+supporting weekly and monthly reports with the documented period, summary totals, timezone,
+generated-at timestamp, charts, task information and footer, handling empty activity, long task
+titles, Unicode, large datasets, multiple pages and page breaks, and exposing no internal database
+IDs, API keys, confirmation tokens, unsubscribe tokens, provider metadata, or another user's
+information; the hourly report worker and signed Resend webhook, where the worker finds due weekly
+and monthly subscriptions, uses users.timezone, safely claims delivery records, prevents duplicate
+sends per user and period, calculates the report, generates the PDF, sends through the existing
+Mailer port, and records attempts, provider IDs, successes and failures, retrying only temporary
+failures and never resending messages Resend has already accepted merely because delivery is
+delayed; and where the webhook verifies signatures from the raw request body, processes events
+idempotently, handles delivered, delayed, failed, suppressed, bounced and complained events, and
+stops future reports after a permanent bounce or complaint. Add focused worker and webhook tests,
+run all existing checks, and provide a safe manual command that sends exactly one test report to an
+explicitly supplied database user using --user-id or TEST_REPORT_USER_ID plus --confirm-send, never
+choosing or sending to multiple users, displaying only the user ID, masked email, verification and
+subscription status, frequency, timezone and report period, refusing unverified addresses unless
+explicitly authorized for testing, and never exposing secrets, full tokens, or complete unsubscribe
+links.
+
+[R4 and R5. Three things the implementation forced and that are recorded rather than absorbed. The
+**unsubscribe token is now derived** — `HMAC(JWT_SECRET, "report-unsubscribe:<userId>")` — because a
+hashed column and a link that must keep working in year-old email cannot both hold with a random
+token the worker has no way to reproduce (§23.3 amended). A **complaint records `unsubscribed`**
+rather than §25.6's original `declined`, now that the two states exist. And **`report_webhook_events`
+was added** as a second migration, because idempotent webhook processing needs somewhere to record
+what it has seen and the soft-bounce counter is the one effect that is not naturally idempotent.
+`pdfmake` is the first new production dependency since the project began; ADR-021 chose it. §30
+records what is verified and what is not — nothing has been sent to a real inbox and no PDF has been
+read by a human.]
+
+`Title`: Use Gmail SMTP as the mail transport
+
+`User prompt`: use gmail smtp — i generated app password for gmail smtp. define variables required
+for smtp in .env file so that i can place values there. using iqbalarslan009@gmail.com, send report
+of the user on same gmail.
+
+[Asked for after Resend refused `MAIL_FROM=iqbalarslan009@gmail.com` twice with HTTP 403 — Resend
+only sends from a DNS-verified domain, and `gmail.com` can never be one. The alternatives were laid
+out (wait for domain verification; `onboarding@resend.dev`, which only delivers to the Resend account
+owner; or SMTP) and SMTP was chosen deliberately. This **supersedes ADR-009's explicit refusal of
+`nodemailer`**, recorded in `locked_decisions.md` with its costs: no delivery webhooks, so §25.6
+bounce handling does not run; no provider message id; a ~500/day Gmail cap; and a translation layer
+for the retry ladder, because SMTP 4xx is transient and 5xx permanent — the inverse of the HTTP
+statuses `decideRetry` reads. To be deleted when the Resend domain verifies.]
+
+
+`Title`: Scope auth test coverage to real behaviour, not field validation
+
+`User prompt`: Review and refine only the test cases for password-based sign-up and login. OAuth is
+completely out of scope for this task. For sign-up, keep only tests that verify the actual working of
+the feature, such as successful registration, persistence of the new user, secure password hashing,
+successful session creation if registration logs the user in, rejection when the email is already in
+use, rejection when the username is already in use, and any other meaningful business, database, or
+security failure that would prevent registration from working correctly. Remove or consolidate small
+input-field validation tests, such as separate cases for empty fields, character lengths, formats,
+individual invalid values, or minor DTO validation rules, unless they protect a critical security
+requirement that cannot be covered elsewhere. For login, keep only tests that verify real
+authentication behavior, such as successful login with correct credentials, rejection for an
+incorrect password, rejection when the account does not exist, correct generic failure responses that
+do not reveal whether an email is registered, password-hash verification, and correct session, token,
+or cookie creation defined by the contract. Remove tests focused only on minor field validation, empty
+inputs, formatting variations, DTO decorators, controller forwarding, mocked method calls, or internal
+implementation details. Keep at least one real-database integration or E2E test that signs up a new
+user and then logs in using the same email and password.
+
+[A standing coverage standard for the auth surface, not a one-off cleanup: a test earns its place by
+proving a behaviour the feature depends on, and per-field validation counts only where it is itself
+the security control. It cut 54 cases to 35 and produced the project's first e2e spec,
+`test/auth.e2e-spec.ts`, which is also the first coverage of the two facts no fake can assert — what
+`password_hash` actually holds, and that the 409 comes from the UNIQUE index rather than a pre-check.
+Two gaps the old suite had are now closed: nothing asserted the password was hashed before it reached
+the repository, and nothing asserted the refresh half of the session either flow returns.]
