@@ -17,6 +17,7 @@ import { AuthModule } from './auth.module';
   imports: [AuthModule],
   controllers: [TaskController],
   providers: [TaskService, TaskRepository],
-  exports: [TaskService],
+  /* TaskRepository is exported for AdminModule's count of an account's tasks — a number, never a row. */
+  exports: [TaskService, TaskRepository],
 })
 export class TaskModule {}

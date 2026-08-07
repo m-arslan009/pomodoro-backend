@@ -98,6 +98,18 @@ export class TaskRepository {
     return { tasks: items, nextCursor };
   }
 
+  /**
+   * How many tasks an account has, for the admin detail view (`admin_role_plan.md` §6.2).
+   *
+   * A COUNT, AND THERE IS NO ADMIN READ OF THE ROWS THEMSELVES. Titles are the user's own words
+   * about their own work; §6.2's privacy line is counts and totals, never records. This method
+   * cannot return one — that is the point of it being a count rather than a `list` with a different
+   * scope, which is what the shortcut would have looked like.
+   */
+  async countForAdmin(userId: string): Promise<number> {
+    return this.prisma.task.count({ where: { userId } });
+  }
+
   /** Used by the recording path to resolve a task link without owning the session tables. */
   async existsForUser(userId: string, taskId: string): Promise<boolean> {
     const row = await this.prisma.task.findFirst({

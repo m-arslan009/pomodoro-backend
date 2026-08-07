@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { AdminIdentityRow } from '../common/types/admin.types';
 import type { AuthIdentityRecord } from '../common/types/oauth.types';
 import type { OAuthProvider } from '../domain/oauth';
 import { PrismaService } from '../database/prisma.service';
@@ -90,6 +91,26 @@ export class AuthIdentityRepository {
   }
 
   /** Records that this identity was used. Forensic only — nothing reads it to make a decision. */
+  /**
+   * The account's linked providers, for the admin detail view (`admin_role_plan.md` §6.2).
+   *
+   * A DIFFERENT PROJECTION FROM `AuthIdentityRecord`, AND THAT IS THE WHOLE REASON IT EXISTS. That
+   * record carries `providerSubject` and `emailAtLink` — the provider's opaque identity key and the
+   * address it asserted at link time — and §6.2 excludes both from every admin response. Reusing the
+   * record here and trusting a caller to drop two fields would make the exclusion a convention;
+   * selecting three columns makes it a fact about the query.
+   *
+   * Ordered oldest first, so the list reads as the account's history of linking rather than in
+   * whatever order the planner returns.
+   */
+  async listForAdmin(userId: string): Promise<AdminIdentityRow[]> {
+    return this.prisma.authIdentity.findMany({
+      where: { userId },
+      orderBy: { linkedAt: 'asc' },
+      select: { provider: true, linkedAt: true, lastLoginAt: true },
+    });
+  }
+
   async touchLastLogin(id: string, at: Date): Promise<void> {
     await this.prisma.authIdentity.update({ where: { id }, data: { lastLoginAt: at } });
   }

@@ -91,6 +91,20 @@ import { UserService } from '../services/user.service';
     { provide: PasswordHasher, useClass: Argon2PasswordHasher },
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [JwtGuard, AccessTokenService, UserRepository, PasswordHasher, Clock],
+  /*
+   * The two repositories added here are exported for AdminModule alone, and read-only in that use:
+   * the account detail view reports how many sessions an account holds and which providers it has
+   * linked. Neither is exported for a feature module to open or close a session with — that
+   * machinery stays internal, as the comment above says.
+   */
+  exports: [
+    JwtGuard,
+    AccessTokenService,
+    UserRepository,
+    AuthSessionRepository,
+    AuthIdentityRepository,
+    PasswordHasher,
+    Clock,
+  ],
 })
 export class AuthModule {}

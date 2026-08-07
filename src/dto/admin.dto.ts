@@ -6,6 +6,8 @@ import {
   ADMIN_USERS_LIMIT_MIN,
   ADMIN_USER_ROLES,
   ADMIN_USER_STATUSES,
+  DISABLE_REASON_MAX_LENGTH,
+  DISABLE_REASON_MIN_LENGTH,
 } from '../domain/admin-user';
 
 /*
@@ -51,3 +53,68 @@ export const listAdminUsersQuerySchema = z.strictObject({
     .default(ADMIN_USERS_LIMIT_DEFAULT),
 });
 export type ListAdminUsersQueryDto = z.infer<typeof listAdminUsersQuerySchema>;
+
+/*
+ * The write bodies.
+ *
+ * `strictObject` everywhere, for the reason stated above and one more that only applies here: these
+ * routes mutate somebody else's account, and a body carrying a key the schema does not know is a
+ * caller who believes they are doing something this endpoint does not do. Failing loudly is the only
+ * safe answer on a destructive path.
+ *
+ * NOTE WHAT NO SCHEMA BELOW ACCEPTS. There is no `disabledAt`, no `status`, no `id`, and no way to
+ * name the actor — every one of those is decided by the server from the verified token and the
+ * clock. The bodies carry a reason, a role and a confirmation, and nothing else.
+ */
+
+/**
+ * `POST /admin/users/:id/disable` (§6.4).
+ *
+ * The reason is REQUIRED. An unexplained disable writes an audit row that answers who and when but
+ * not why, which is the one question the trail exists to answer. Trimmed before it is measured, so a
+ * box full of spaces is rejected as empty rather than accepted as a reason nobody can read.
+ */
+export const disableUserSchema = z.strictObject({
+  reason: z
+    .string()
+    .trim()
+    .min(DISABLE_REASON_MIN_LENGTH, 'Give a reason for disabling this account.')
+    .max(
+      DISABLE_REASON_MAX_LENGTH,
+      `Reasons are ${DISABLE_REASON_MAX_LENGTH} characters or fewer.`,
+    ),
+});
+export type DisableUserDto = z.infer<typeof disableUserSchema>;
+
+/**
+ * `PATCH /admin/users/:id/role` (§6.7).
+ *
+ * The one write path to `users.role` in the application, and the enum is the same constant the
+ * database CHECK constraint mirrors — a value outside it is a 422 here rather than a constraint
+ * violation three layers down.
+ */
+export const changeUserRoleSchema = z.strictObject({
+  role: z.enum(ADMIN_USER_ROLES, 'Choose a supported role.'),
+});
+export type ChangeUserRoleDto = z.infer<typeof changeUserRoleSchema>;
+
+/**
+ * `DELETE /admin/users/:id` (§6.9) — the typed confirmation, verified by the server.
+ *
+ * NORMALISED THE WAY `users.email` IS STORED: trim + lowercase, which a CHECK constraint pins on the
+ * column. That makes the comparison in the repository an exact string match with nothing left to
+ * forgive, and it means an operator who types the address with a capital letter is not refused for a
+ * difference the database does not consider one.
+ *
+ * The confirmation is checked against the row inside the deleting transaction, never here — a DTO
+ * can only say the value is well-formed, and "well-formed" is not "the right account".
+ */
+export const deleteUserSchema = z.strictObject({
+  confirmEmail: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(1, 'Type the account’s email address to confirm.')
+    .max(ADMIN_SEARCH_MAX_LENGTH),
+});
+export type DeleteUserDto = z.infer<typeof deleteUserSchema>;

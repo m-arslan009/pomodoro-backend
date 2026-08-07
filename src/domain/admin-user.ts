@@ -7,10 +7,10 @@
  * without a round trip; this file is what actually decides, and the DTO re-checks every request
  * against it.
  *
- * SCOPE. This is the READ half of the admin surface and nothing more. There is no disable rule here,
- * no reactivate rule, no role-change rule and no audit vocabulary — `disabled_at` is *read* to derive
- * a status and is written by nothing in the application (`admin_role_plan.md` §6.4 owns that, and it
- * is not built).
+ * SCOPE. Directory shape and account status — what the list and detail reads accept, and how a
+ * status is derived. The *rules* about who may do what to whom are `domain/role.ts`, and the audit
+ * vocabulary is `domain/admin-audit.ts`; they are separate files because they are separate
+ * questions, and because a rule buried in a constants module is a rule nobody finds.
  */
 
 /** The roles an account can hold. Mirrors the `users_role_check` constraint exactly. */
@@ -34,6 +34,17 @@ export const ADMIN_SEARCH_MAX_LENGTH = 320;
 export const ADMIN_USERS_LIMIT_MIN = 1;
 export const ADMIN_USERS_LIMIT_MAX = 100;
 export const ADMIN_USERS_LIMIT_DEFAULT = 50;
+
+/**
+ * The disable reason's bounds (§6.4), mirrored in the frontend's `services/adminUsers.js`.
+ *
+ * REQUIRED, NOT OPTIONAL, AND THAT IS THE WHOLE DESIGN OF THE FIELD. An unexplained disable writes
+ * an audit row that answers who and when but not why, which is the one question a trail is read to
+ * answer. Three characters is a low bar deliberately: it rejects an empty box and a stray keystroke
+ * without pretending the server can judge whether a reason is a good one.
+ */
+export const DISABLE_REASON_MIN_LENGTH = 3;
+export const DISABLE_REASON_MAX_LENGTH = 280;
 
 /**
  * The storage form of a search term.

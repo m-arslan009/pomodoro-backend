@@ -205,6 +205,17 @@ export class OAuthService {
       // rather than opening a session for an identity pointing at nobody.
       if (user === null) return { kind: 'failed', code: 'invalid_request' };
 
+      /*
+       * A disabled account cannot sign in through a provider either, and it fails with the same
+       * coarse `invalid_request` every other failure here uses. §6 rule 3 is why the codes are
+       * coarse: this callback is reached by an unauthenticated caller, and a `disabled` code would
+       * turn it into an oracle for the state of somebody else's account.
+       *
+       * Checked here rather than in `startSession`, so nothing is written first — no
+       * `last_login_at`, no touched identity, and no session row to revoke afterwards.
+       */
+      if (user.disabledAt !== null) return { kind: 'failed', code: 'invalid_request' };
+
       await this.identities.touchLastLogin(identity.id, now);
       await this.users.markLogin(user.id, now);
       return { kind: 'user', user };
@@ -214,6 +225,13 @@ export class OAuthService {
 
     // 3b-ii — auto-link. Sound only because step 0 already refused an unverified address.
     if (existing !== null) {
+      /*
+       * The same refusal as the returning-user branch, and it has to be checked before the link is
+       * created: auto-linking a disabled account would leave behind a credential that starts working
+       * the moment the account is reactivated, without anybody having decided that.
+       */
+      if (existing.disabledAt !== null) return { kind: 'failed', code: 'invalid_request' };
+
       const linked = await this.identities.create({
         userId: existing.id,
         provider: PROVIDER,

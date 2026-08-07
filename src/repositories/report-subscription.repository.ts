@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { AdminReportsSummary } from '../common/types/admin.types';
 import type { DueSubscriptionRecord, ReportSubscriptionRecord } from '../common/types/report.types';
 import { PrismaService } from '../database/prisma.service';
 import type { ReportFrequency, SubscriptionStatus } from '../domain/report';
@@ -77,6 +78,48 @@ export class ReportSubscriptionRepository {
       where: { userId },
       select: SELECT,
     }) as Promise<ReportSubscriptionRecord | null>;
+  }
+
+  /**
+   * The subscription and its most recent attempt, for the admin detail view (§6.2).
+   *
+   * A SEPARATE PROJECTION FROM `findByUserId`, DELIBERATELY. That method returns the full record,
+   * which carries `confirmation_token_hash` and `unsubscribe_token_hash` — both credentials, both on
+   * §6.2's deny-list. Reusing it here and trusting the caller to drop two fields would make the
+   * exclusion a convention; selecting two columns makes it a property of the query.
+   *
+   * `last_error` IS EXCLUDED FOR ITS OWN REASON, and it is not the same one. It is the mail
+   * provider's own words, it can quote an address or an internal reason, and §26.4 says plainly that
+   * it is returned by no endpoint. What an operator needs is whether the last attempt worked and
+   * when — two values that answer the question without quoting anybody.
+   *
+   * The deliveries join is ordered newest-first and taken one at a time: this is the *latest*
+   * attempt, not a delivery history, and there is no admin route that returns the ledger.
+   *
+   * @returns null when the account has never answered the reports question — no row means silence.
+   */
+  async findAdminSummary(userId: string): Promise<AdminReportsSummary | null> {
+    const row = await this.prisma.reportSubscription.findUnique({
+      where: { userId },
+      select: {
+        status: true,
+        frequency: true,
+        deliveries: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { status: true, createdAt: true },
+        },
+      },
+    });
+    if (!row) return null;
+
+    const latest = row.deliveries[0] ?? null;
+    return {
+      status: row.status,
+      frequency: row.frequency,
+      lastDeliveryStatus: latest?.status ?? null,
+      lastDeliveryAt: latest?.createdAt ?? null,
+    };
   }
 
   /** @returns null when the account no longer exists. */

@@ -41,6 +41,13 @@ import { SessionModule } from './session.module';
    */
   imports: [AuthModule, SessionModule],
   controllers: [ReportController, ReportTokenController, ReportWorkerController],
+  /*
+   * Exported for AdminModule alone, and for one narrow read: `findAdminSummary`, which reports a
+   * subscription's status and its last delivery's outcome on the account detail page. The
+   * subscription *service* is deliberately not exported — nothing outside this module may change
+   * somebody's answer to the reports question, and no admin route does.
+   */
+  exports: [ReportSubscriptionRepository],
   providers: [
     ReportSubscriptionService,
     ReportMailService,

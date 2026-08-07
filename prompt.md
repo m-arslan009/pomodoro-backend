@@ -835,3 +835,53 @@ and there is no account whose landing page could be chosen. `resolveReturnTo` ta
 called after `startSession`, so the redirect is decided from the same `UserProfile` the password
 flow returns. `/admin` joins `ALLOWED_RETURN_TO`, which grants nothing — `AdminGuard` is still what
 refuses a non-admin.]
+
+## Admin User Detail backend and the user-management endpoints
+
+Implement the backend for the Admin User Detail page and make sure the existing frontend is wired to
+the correct endpoints. Keep the work limited to user-detail functionality and user-related admin
+actions.
+
+Add/properly implement `GET /api/v1/admin/users/:id` to return the admin-safe user detail payload
+required by the frontend, including basic account information, role/status, email verification,
+timezone, password availability/change time, linked identities, active session count/last seen,
+gamification summary, task/focus-session counts, and report subscription/delivery summary. Return
+only explicitly allowed fields; never expose password hashes, refresh/session tokens, OAuth-sensitive
+identifiers, report errors, task contents, or focus-session contents.
+
+Implement the user-management endpoints used by the detail page: `POST
+/api/v1/admin/users/:id/disable`, `POST /api/v1/admin/users/:id/reactivate`, `DELETE
+/api/v1/admin/users/:id/sessions`, `PATCH /api/v1/admin/users/:id/role`, and `DELETE
+/api/v1/admin/users/:id` for permanent deletion. Protect all endpoints with the existing admin
+authentication/authorization guards and follow the existing validation, service, repository,
+transaction, and error-handling conventions.
+
+Respect the admin domain rules: an admin cannot disable, delete, or change their own role; the last
+admin cannot be disabled or demoted; disabling a user should immediately mark the account disabled
+and revoke their sessions; reactivation should restore login ability without restoring old sessions;
+session revocation should revoke active sessions; and role changes should become effective
+immediately through the existing role-aware authorization flow. Permanent deletion must require the
+frontend-provided exact email confirmation and validate it server-side before deleting.
+
+After implementing the backend, inspect the existing Admin User Detail frontend and ensure
+`services/admin.js` and the page call these exact endpoints with the correct HTTP methods, request
+bodies, and response handling. Do not duplicate API logic or bypass the existing `api.js` transport
+layer. After successful actions, update/refetch the user detail from the server so the UI reflects
+authoritative state. Properly surface `404`, `409`, `422`, and other API errors. Do not implement the
+Audit page, Stats page, settings, or unrelated admin functionality. Do not redesign the frontend.
+
+[The write half of the admin surface, and the increment that makes `disabled_at` mean something.
+Three things follow from the instruction and are now settled. **Auditing is a precondition, not a
+feature**: `CONTRACT.md` §31 said no admin route may mutate anything until `admin_audit_events`
+exists, so the table ships here even though the feed that reads it is explicitly out of scope — every
+one of the five writes commits its row in the same transaction as its change, and there is no update
+or delete path for that table anywhere. **"Immediately" required the authentication layer**: revoking
+sessions cannot close the 15-minute window in which an already-issued access token still works, so
+`JwtGuard`, login, refresh and the OAuth callback now read `disabled_at` and refuse on it — each with
+the same indistinguishable response its neighbours already gave, so the new state is not an
+enumeration oracle. **The rules run inside the transaction**: `domain/role.ts` holds them as pure
+functions and the repository evaluates them under the write's own snapshot, because "am I the last
+administrator?" answered outside it lets two concurrent demotions each see two admins and together
+empty the set. The detail payload is a fan-out across six owning repositories rather than a join,
+each with its own narrow admin projection — which is how `provider_subject`, the session digests, the
+report token hashes and `last_error` stay out of it by construction rather than by being stripped.]

@@ -42,10 +42,14 @@ export interface UserRecord {
   /**
    * When an administrator disabled the account, or null while it is active.
    *
-   * **Read by nothing that grants or refuses anything.** It exists so the admin directory can derive
-   * a status; no guard consults it, login does not consult it, and no application code writes it —
-   * disable and reactivate are `admin_role_plan.md` §6.4/§6.5 and are not built. Nothing may be
-   * built on top of this column on the assumption that a disabled account cannot sign in.
+   * **Read by the authentication layer, and it refuses.** `JwtGuard` rejects a request from a
+   * disabled account with the same 401 as every other rejection; login refuses with the same generic
+   * `Invalid credentials` a wrong password gets, and still pays the Argon2 cost so timing cannot
+   * tell the two apart; refresh refuses and the cookie is cleared; the OAuth callback redirects with
+   * the coarse `invalid_request` code. Because `JwtGuard` already loads this row on every
+   * authenticated request, a disable is effective on the account's very next call.
+   *
+   * Written by `POST /admin/users/:id/disable` and `/reactivate` only, both behind `AdminGuard`.
    */
   readonly disabledAt: Date | null;
   readonly createdAt: Date;
@@ -62,11 +66,12 @@ export interface UserProfile {
   readonly timezone: string;
   /**
    * Read-only output. No public write path can set it — the repository's create and update inputs
-   * have no `role` field, so it is echoed here and assigned nowhere else in the application.
+   * have no `role` field, and the one route that does write it is `PATCH /admin/users/:id/role`,
+   * itself behind `AdminGuard`.
    *
    * The client uses it to decide which navigation to render. That is a convenience, not a control:
-   * no server route gates on it yet, and when an admin surface exists the server's own answer will
-   * be the boundary.
+   * `AdminGuard` gates the `/admin` namespace on the same value read from the row, and its 404 is
+   * the boundary. A browser that lies to itself about this field gets a different menu and no more.
    */
   readonly role: UserRole;
   readonly emailVerified: boolean;

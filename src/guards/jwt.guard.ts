@@ -35,12 +35,29 @@ export class JwtGuard implements CanActivate {
 
     /*
      * The only server-side state consulted is the account itself. There is no session record to
-     * check, so a valid token authenticates until it expires — deleting the account is the one
-     * thing that stops it early, and that is a side effect of needing the profile, not a
-     * revocation mechanism. JWT_ACCESS_TTL_MS is what bounds a compromise.
+     * check, so a valid token authenticates until it expires — JWT_ACCESS_TTL_MS is what bounds a
+     * compromise. Two things about the account stop a token early, and both are read from the row
+     * this lookup already loads: the account being gone, and the account being disabled.
      */
     const user = await this.users.findById(claims.userId);
     if (!user) throw notAuthenticatedProblem();
+
+    /*
+     * A disabled account is refused here, and this branch is the reason disabling works at all.
+     *
+     * Revoking sessions alone cannot close the 15-minute window in which an access token already
+     * issued keeps working, because nothing on this path reads `auth_sessions`. This does read the
+     * account, on every authenticated request, for the profile — so refusing on `disabled_at` costs
+     * one comparison and makes a disable effective on the target's very next call rather than when
+     * their token expires. `POST /admin/users/:id/disable` revokes the refresh half in the same
+     * transaction; between them, access stops immediately and cannot be renewed.
+     *
+     * The same 401 as every other rejection, deliberately. "Your account was disabled" and "your
+     * token expired" are different sentences, and the difference is exactly what a probing caller
+     * would read. The client needs no branch either: this is the path an expired session already
+     * takes — one failed refresh, then anonymous, then the login screen.
+     */
+    if (user.disabledAt !== null) throw notAuthenticatedProblem();
 
     request.auth = {
       userId: user.id,

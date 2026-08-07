@@ -65,11 +65,15 @@ model User {
   /// deliberately — every existing row became 'user' at ALTER time and every future insert inherits
   /// it without any code stating it, so no write path can bypass the default by forgetting to.
   ///
-  /// Nothing in the application writes this column: neither `CreateUserInput` nor
+  /// Exactly one route writes this column — `PATCH /admin/users/:id/role`, itself behind
+  /// `AdminGuard` — and no public path can reach it: neither `CreateUserInput` nor
   /// `CreateUserFromIdentityInput` nor `UpdateProfileInput` carries a `role` field, and the
-  /// repository builds Prisma's `data` from those typed inputs, so a public request body cannot
-  /// reach it by spread. It is currently **read** only to be echoed on `UserProfile`; no guard,
-  /// route or rule gates on it yet.
+  /// repository builds Prisma's `data` from those typed inputs, so a request body cannot set it by
+  /// spread.
+  ///
+  /// It is **read** on every authenticated request, because `AdminGuard` reads the row `JwtGuard`
+  /// just loaded rather than a token claim. A promotion or demotion is therefore effective on the
+  /// account's very next call, which is the property a claim would have destroyed.
   role String @default("user") @db.VarChar(16)
 
   /// Written by a verified Google sign-in (ADR-008a) — the first and only writer. Still **read** by
@@ -99,13 +103,18 @@ model User {
   /// same fact is a second thing to keep in step and the two would disagree the first time a disable
   /// failed halfway.
   ///
-  /// Nullable and unwritten by any code path — the timestamp arrives with `POST /admin/users/:id/
-  /// disable` (`admin_role_plan.md` §6.4), which is not built. Ships now so that feature is a pure
-  /// addition rather than a migration, exactly as `tasks.estimated_pomodoros` did.
+  /// Written by exactly two routes — `POST /admin/users/:id/disable` sets it and
+  /// `POST /admin/users/:id/reactivate` clears it (`admin_role_plan.md` §6.4/§6.5) — and by nothing
+  /// else. No public path can reach it: no DTO carries it and the repository builds Prisma's `data`
+  /// from typed inputs, so a request body cannot set it by spread.
   ///
-  /// **Read by nothing that grants or refuses anything.** `JwtGuard` does not consult it, login does
-  /// not consult it, and the JWT claim set is unchanged. A disabled account can still sign in today;
-  /// nothing may be built on the assumption that it cannot.
+  /// **Now read by the authentication layer, and that is the whole point of the column.** `JwtGuard`
+  /// refuses a request from a disabled account with the same 401 as every other rejection, login
+  /// refuses with the same generic `Invalid credentials` a wrong password gets (and still pays the
+  /// Argon2 cost, so timing does not tell the two apart), refresh refuses and clears the cookie, and
+  /// the OAuth callback redirects with the coarse `invalid_request` code. Because the guard already
+  /// loads this row on every authenticated request, a disable is effective immediately rather than
+  /// when the account's access token expires.
   disabledAt DateTime? @map("disabled_at") @db.Timestamptz(3)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -119,6 +128,12 @@ model User {
   authSessions       AuthSession[]
   identities         AuthIdentity[]
   reportSubscription ReportSubscription?
+
+  /// The audit trail, from both ends. Two named relations because one row references `users` twice
+  /// — who acted, and who it was done to — and Prisma cannot infer which foreign key each back
+  /// reference belongs to. Neither side cascades: see `AdminAuditEvent`.
+  auditEventsActed    AdminAuditEvent[] @relation("AuditActor")
+  auditEventsReceived AdminAuditEvent[] @relation("AuditTarget")
 
   /// The admin directory's sort and cursor key (`admin_role_plan.md` §6.1). Descending on both
   /// columns because the list is read newest-first and the keyset predicate walks it in exactly that
@@ -567,4 +582,65 @@ model ReportWebhookEvent {
   /// Swept with the deliveries it describes (L4).
   @@index([receivedAt])
   @@map("report_webhook_events")
+}
+
+/// One administrative action, recorded as it happened (`admin_role_plan.md` §5).
+///
+/// APPEND-ONLY, AND WRITTEN INSIDE THE MUTATION'S TRANSACTION. Every state change in the admin
+/// namespace and its audit row commit together, the same reasoning ADR-006 gives for synchronous
+/// projections: an action that succeeded is always recorded, and one that rolled back is never
+/// recorded as having happened. There is no update path and no delete path anywhere in the
+/// application — the repository exposes inserts only.
+///
+/// `ON DELETE SET NULL`, NOT `Cascade`, and this is the one table in the schema that deliberately
+/// breaks the `user_avatars` precedent. Cascading would mean deleting an account erases the record
+/// that it was deleted, which is the single thing an audit trail may not do.
+///
+/// THE EMAIL SNAPSHOTS ARE WHAT MAKE THAT WORK. Same pattern and same justification as
+/// `focus_sessions.task_title_snapshot`: stored verbatim, never derived, so the history survives the
+/// row it describes. The foreign keys are a convenience for joining while both accounts still
+/// exist; the snapshots are the record.
+///
+/// WHAT A ROW MAY NEVER CONTAIN (§5.3): no password or hash, no token or token digest, no cookie
+/// value, no `provider_subject`, no OAuth secret, no `report_deliveries.last_error`, and no task or
+/// focus-session content. `metadata` is built in the service from a typed per-action union and is
+/// never spread from a request body — that is the mechanical guarantee, not the convention.
+model AdminAuditEvent {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Who acted. Null once that account is deleted, or for a system-written event.
+  actorUserId        String? @map("actor_user_id") @db.Uuid
+  actorEmailSnapshot String  @map("actor_email_snapshot") @db.VarChar(320)
+
+  /// Who it was done to. Null once that account is deleted — which is exactly the case a deletion
+  /// row describes, and the reason the snapshot beside it is the authority.
+  targetUserId        String? @map("target_user_id") @db.Uuid
+  targetEmailSnapshot String? @map("target_email_snapshot") @db.VarChar(320)
+
+  /// One of the values in `domain/admin-audit.ts`. VarChar + CHECK rather than a Prisma enum,
+  /// matching this schema's refusal of them elsewhere.
+  action String @db.VarChar(48)
+
+  /// The action's own typed detail — a disable reason, a role transition, a revoked count.
+  metadata Json @default("{}")
+
+  /// Joins this row to its Pino log line and to the Problem Details `instance` of the same request
+  /// (ADR-016). One id, three surfaces.
+  requestId String? @map("request_id") @db.VarChar(64)
+
+  ip        String? @db.VarChar(45)
+  userAgent String? @map("user_agent") @db.VarChar(512)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actor  User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  target User? @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  /// The feed's order. Newest first, with the id breaking ties so a cursor page cannot drop a row.
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  /// "Everything done to this account", which is how an operator reads one user's history.
+  @@index([targetUserId, createdAt(sort: Desc)])
+  /// "Everything this operator did."
+  @@index([actorUserId, createdAt(sort: Desc)])
+  @@map("admin_audit_events")
 }

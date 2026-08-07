@@ -132,6 +132,21 @@ export class AuthService {
       throw invalidCredentialsProblem();
     }
 
+    /*
+     * A disabled account cannot sign in, and it fails exactly like a wrong password — the same
+     * problem response *and* the same Argon2 cost. Both halves matter for the same reason they do
+     * one branch above: skipping the verification would make this path measurably faster and turn
+     * the login endpoint into an oracle for "which accounts have been disabled", which is an
+     * operational fact about a person that an anonymous caller has no business measuring.
+     *
+     * Checked before the password rather than after, so a disabled account's stored hash is never
+     * compared against anything. The dummy verify keeps the timing indistinguishable regardless.
+     */
+    if (user.disabledAt !== null) {
+      await this.hasher.verifyDummy(dto.password);
+      throw invalidCredentialsProblem();
+    }
+
     if (!(await this.hasher.verify(user.passwordHash, dto.password))) {
       throw invalidCredentialsProblem();
     }
@@ -167,6 +182,18 @@ export class AuthService {
     // is close to unreachable — and it fails closed rather than issuing a token for nobody.
     const user = await this.users.findById(rotated.userId);
     if (!user) throw notAuthenticatedProblem();
+
+    /*
+     * A disabled account gets no new access token. In practice disabling already revoked every
+     * session in the same transaction, so a cookie should not survive to reach this line — this is
+     * the belt to that braces, and it covers the one ordering that could otherwise slip through: a
+     * refresh already in flight when the disable committed.
+     *
+     * The same indistinguishable 401 as every other refresh failure, which the controller answers
+     * with a clearing `Set-Cookie` — so a dead cookie does not linger to be retried on the next
+     * load. One more indistinguishable cause, not a new response.
+     */
+    if (user.disabledAt !== null) throw notAuthenticatedProblem();
 
     const access = await this.accessTokens.issue(user.id);
 

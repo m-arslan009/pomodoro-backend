@@ -135,6 +135,39 @@ export class AuthSessionRepository {
   }
 
   /**
+   * The account's session state for the admin detail view (`admin_role_plan.md` §6.2).
+   *
+   * TWO NUMBERS, NEVER THE ROWS. There is no admin path to a session list, and there must not be
+   * one: the rows carry `token_hash`, an IP and a user agent, and an operator's legitimate question
+   * is "is anyone signed in, and when were they last here" rather than "from where". A count and a
+   * maximum answer that and disclose nothing that could be replayed.
+   *
+   * "Active" is live *and* unexpired, which is the same predicate rotation would accept — a revoked
+   * or aged-out row is not a session anybody is using, and counting it would tell an operator that
+   * revoking would do something when it would not.
+   *
+   * `lastSeenAt` deliberately spans revoked and expired rows: it answers "when was this account last
+   * here", and cutting an account's sessions must not erase the fact that it was recently active.
+   */
+  async summariseForAdmin(
+    userId: string,
+    now: Date,
+  ): Promise<{ activeCount: number; lastSeenAt: Date | null }> {
+    const [activeCount, latest] = await Promise.all([
+      this.prisma.authSession.count({
+        where: { userId, revokedAt: null, expiresAt: { gt: now } },
+      }),
+      this.prisma.authSession.findFirst({
+        where: { userId },
+        orderBy: { lastSeenAt: 'desc' },
+        select: { lastSeenAt: true },
+      }),
+    ]);
+
+    return { activeCount, lastSeenAt: latest?.lastSeenAt ?? null };
+  }
+
+  /**
    * Drop this account's dead rows. Called on login only — bounded work on a path that is already
    * writing, which is why no scheduled job exists (ADR-014).
    *

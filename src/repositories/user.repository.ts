@@ -1,13 +1,31 @@
 import { Injectable } from '@nestjs/common';
+import type { AdminActionContext, AdminUserDetailRow } from '../common/types/admin.types';
 import type { AdminUserRow, UserRecord } from '../common/types/user.types';
 import { decodeCursor, paginate } from '../common/utils/cursor';
 import { PrismaService } from '../database/prisma.service';
+import type { AdminAuditEntry } from '../domain/admin-audit';
 import type { AdminUserRole, AdminUserStatus } from '../domain/admin-user';
+import type { RoleRuleTarget, RoleRuleViolation } from '../domain/role';
 
 /*
  * The only component allowed to read or write the users table (ADR-020).
  *
  * Every method returns a plain UserRecord rather than a Prisma row, so the ORM stops here.
+ *
+ * THE ADMINISTRATION SECTION AT THE BOTTOM IS THE ONE PLACE IN THE APPLICATION THAT ADDRESSES
+ * SOMEBODY ELSE'S ACCOUNT. Everything above it takes a `userId` the caller already proved they own,
+ * which is ADR-010's ownership-as-a-query-constraint in practice. The admin methods deliberately do
+ * not, and they are gathered under one heading rather than scattered so that ADR-010's actual
+ * security property survives the exception: *bypass requires deliberately writing an unscoped query,
+ * which is reviewable in one place.*
+ *
+ * That section also writes two tables this repository does not own — `auth_sessions` and
+ * `admin_audit_events` — and that is the narrower violation, the same one `createFromIdentity`
+ * already makes for `auth_identities` and `UserAvatarRepository` makes for `users`. The alternative
+ * is passing a transaction handle across repositories, which leaks the ORM into the service layer
+ * that ADR-004's escape hatch depends on keeping clean. Atomicity is not negotiable here: an audit
+ * row that commits without its state change, or a disable that commits without revoking sessions,
+ * are both worse than the layering compromise.
  */
 
 export interface CreateUserInput {
@@ -86,6 +104,60 @@ const ADMIN_USER_FIELDS = {
   disabledAt: true,
   createdAt: true,
 } as const;
+
+/**
+ * The `users` columns the detail read may select — the allow-list, one layer down.
+ *
+ * `passwordHash` IS SELECTED AND IS NEVER RETURNED. The detail payload needs to say *whether* the
+ * account has a password, and Prisma cannot compute a boolean in a `select`. So the column is read
+ * inside this file — which is the layer already trusted with credentials, since `UserRecord` carries
+ * the hash — and reduced to `hasPassword` before the row leaves. `AdminUserDetailRow` has no field
+ * that could hold it, so the reduction is checked by the compiler rather than remembered.
+ */
+const ADMIN_DETAIL_FIELDS = {
+  id: true,
+  email: true,
+  username: true,
+  firstName: true,
+  lastName: true,
+  role: true,
+  timezone: true,
+  emailVerifiedAt: true,
+  passwordChangedAt: true,
+  passwordHash: true,
+  avatarUpdatedAt: true,
+  disabledAt: true,
+  createdAt: true,
+} as const;
+
+/**
+ * Why an administrative write was refused, or that the target does not exist.
+ *
+ * `not_found` is in the same union as the rule violations because the caller has to answer all of
+ * them and the transaction is the only place that can tell them apart — the row is read, the rules
+ * are applied and the write happens under one snapshot.
+ */
+export type AdminActionRefusal = RoleRuleViolation | 'not_found' | 'email_mismatch';
+
+export type AdminActionResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly refusal: AdminActionRefusal };
+
+/**
+ * The rule check, supplied by the caller and run **inside the transaction**.
+ *
+ * A parameter rather than an `if` in this file, for the same reason `SessionRepository.record` takes
+ * the scoring fold as one: the rules stay in `src/domain`, pure and testable without a database,
+ * while this method owns the snapshot they must be evaluated under. Rule 3 in particular is only
+ * correct inside the transaction — two concurrent demotions evaluating "am I the last admin?"
+ * outside it would each see two administrators and together empty the set.
+ *
+ * Returns the violation to refuse with, or null to proceed.
+ */
+export type AdminRuleCheck = (
+  target: RoleRuleTarget,
+  adminCount: number,
+) => RoleRuleViolation | null;
 
 /** Prisma's unique-constraint failure, detected structurally so no ORM type escapes this file. */
 function isUniqueViolation(error: unknown): error is { code: string; meta?: { target?: unknown } } {
@@ -331,4 +403,354 @@ export class UserRepository {
   async markLogin(id: string, at: Date): Promise<void> {
     await this.prisma.user.update({ where: { id }, data: { lastLoginAt: at } });
   }
+
+  /* ------------------------------------------------------------ Administration -- */
+  /*
+   * Everything below addresses an account the caller does not own. See the file header for why they
+   * are gathered here rather than spread across the services that call them, and why they are
+   * allowed to write `auth_sessions` and `admin_audit_events` inside their own transactions.
+   *
+   * A SHARED SHAPE, DELIBERATELY. Every write below reads the target row, evaluates the caller's
+   * rules against it, performs its change, and inserts exactly one audit row — all under one
+   * transaction, in that order. Where an action is idempotent it returns early *after* the rule
+   * check and *before* the audit insert, so repeating it is a 200 that records nothing rather than a
+   * second row claiming the same thing happened twice.
+   */
+
+  /**
+   * One account's detail for an operator (`admin_role_plan.md` §6.2).
+   *
+   * The `users` half only. Sessions, identities, counts, progression and reports each belong to
+   * another table, and each is read by that table's own repository — this method does not join
+   * across them, so no single query here can grow into one that returns another account's rows.
+   */
+  async findAdminDetailById(id: string): Promise<AdminUserDetailRow | null> {
+    const row = await this.prisma.user.findUnique({ where: { id }, select: ADMIN_DETAIL_FIELDS });
+    if (!row) return null;
+
+    // The reduction. `passwordHash` exists in this statement's result and in no value that leaves.
+    const { passwordHash, ...rest } = row;
+    return { ...rest, hasPassword: passwordHash !== null };
+  }
+
+  /**
+   * Disable an account, revoke every session it holds, and record why — atomically (§6.4).
+   *
+   * REVOKING IN THE SAME TRANSACTION IS LOAD-BEARING, not tidiness. Without it the refresh cookie
+   * survives the disable, and a later reactivation would silently restore a live 30-day credential
+   * that was in an attacker's hands throughout the disabled period.
+   *
+   * Idempotent on an already-disabled account: 200, no second audit row, no second revocation. The
+   * timestamp keeps naming the moment the account was actually disabled rather than the last time
+   * somebody asked.
+   *
+   * @returns how many sessions the disable revoked.
+   */
+  async disableForAdmin(
+    targetId: string,
+    reason: string,
+    context: AdminActionContext,
+    check: AdminRuleCheck,
+  ): Promise<AdminActionResult<{ sessionsRevoked: number }>> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await readRuleTarget(tx, targetId);
+      if (!target) return { ok: false, refusal: 'not_found' };
+
+      const violation = check(target.rules, await countAdmins(tx));
+      if (violation) return { ok: false, refusal: violation };
+
+      // Already disabled — nothing to do, and nothing to record.
+      if (target.rules.disabled) return { ok: true, value: { sessionsRevoked: 0 } };
+
+      const revoked = await tx.authSession.updateMany({
+        where: { userId: targetId, revokedAt: null },
+        data: { revokedAt: context.now },
+      });
+
+      await tx.user.update({ where: { id: targetId }, data: { disabledAt: context.now } });
+
+      await writeAudit(tx, {
+        action: 'user.disabled',
+        actorUserId: context.actorId,
+        actorEmailSnapshot: context.actorEmail,
+        targetUserId: targetId,
+        targetEmailSnapshot: target.email,
+        metadata: { reason, sessionsRevoked: revoked.count },
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      return { ok: true, value: { sessionsRevoked: revoked.count } };
+    });
+  }
+
+  /**
+   * Clear the disabled flag (§6.5).
+   *
+   * SESSIONS STAY REVOKED. Reactivation restores the ability to sign in, not the sessions that
+   * existed before it — the user signs in again with the credential they already had, and both
+   * password and Google sign-in work unchanged because neither was touched.
+   *
+   * No rule bounds this one: making an account usable again cannot empty the administrator set or
+   * lock the operator out, so there is nothing to refuse. Idempotent on an active account.
+   */
+  async reactivateForAdmin(
+    targetId: string,
+    context: AdminActionContext,
+  ): Promise<AdminActionResult<null>> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await readRuleTarget(tx, targetId);
+      if (!target) return { ok: false, refusal: 'not_found' };
+
+      if (!target.rules.disabled) return { ok: true, value: null };
+
+      await tx.user.update({ where: { id: targetId }, data: { disabledAt: null } });
+
+      await writeAudit(tx, {
+        action: 'user.reactivated',
+        actorUserId: context.actorId,
+        actorEmailSnapshot: context.actorEmail,
+        targetUserId: targetId,
+        targetEmailSnapshot: target.email,
+        metadata: {},
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      return { ok: true, value: null };
+    });
+  }
+
+  /**
+   * Revoke every live refresh session for an account, without touching the account (§6.6).
+   *
+   * Sets `revoked_at` and keeps the rows, never deletes them — that is what lets reuse detection
+   * still tell a replayed token from an unknown one.
+   *
+   * A revocation of zero sessions is still audited, unlike the idempotent no-ops above. The
+   * operator took an action and it had an effect they should be able to see recorded: "we cut this
+   * account's sessions and there were none" is a fact worth having in the trail.
+   */
+  async revokeSessionsForAdmin(
+    targetId: string,
+    context: AdminActionContext,
+    check: AdminRuleCheck,
+  ): Promise<AdminActionResult<{ revoked: number }>> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await readRuleTarget(tx, targetId);
+      if (!target) return { ok: false, refusal: 'not_found' };
+
+      const violation = check(target.rules, await countAdmins(tx));
+      if (violation) return { ok: false, refusal: violation };
+
+      const revoked = await tx.authSession.updateMany({
+        where: { userId: targetId, revokedAt: null },
+        data: { revokedAt: context.now },
+      });
+
+      await writeAudit(tx, {
+        action: 'user.sessions_revoked',
+        actorUserId: context.actorId,
+        actorEmailSnapshot: context.actorEmail,
+        targetUserId: targetId,
+        targetEmailSnapshot: target.email,
+        metadata: { revoked: revoked.count },
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      return { ok: true, value: { revoked: revoked.count } };
+    });
+  }
+
+  /**
+   * The only write path to `users.role` in the entire application (§6.7).
+   *
+   * A DEMOTION DOES NOT REVOKE SESSIONS, deliberately. The demoted account stays signed in as an
+   * ordinary user, and because `AdminGuard` reads the role from the row `JwtGuard` already loads
+   * rather than from a token claim, the demotion is effective on their very next request. Signing
+   * them out as well would be a punishment unrelated to the privilege change.
+   *
+   * Idempotent to the role the account already holds: 200, no audit row — a state that did not
+   * change did not happen.
+   */
+  async changeRoleForAdmin(
+    targetId: string,
+    nextRole: AdminUserRole,
+    context: AdminActionContext,
+    check: AdminRuleCheck,
+  ): Promise<AdminActionResult<null>> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await readRuleTarget(tx, targetId);
+      if (!target) return { ok: false, refusal: 'not_found' };
+
+      const violation = check(target.rules, await countAdmins(tx));
+      if (violation) return { ok: false, refusal: violation };
+
+      if (target.rules.role === nextRole) return { ok: true, value: null };
+
+      await tx.user.update({ where: { id: targetId }, data: { role: nextRole } });
+
+      await writeAudit(tx, {
+        action: 'user.role_changed',
+        actorUserId: context.actorId,
+        actorEmailSnapshot: context.actorEmail,
+        targetUserId: targetId,
+        targetEmailSnapshot: target.email,
+        metadata: { from: target.rules.role, to: nextRole },
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      return { ok: true, value: null };
+    });
+  }
+
+  /**
+   * Permanently delete an account and everything belonging to it (§6.9).
+   *
+   * THE CONFIRMATION IS VERIFIED HERE, INSIDE THE TRANSACTION, against the row about to be deleted.
+   * A client-side dialog protects nobody against a request that never went through the client, and
+   * comparing outside the transaction would leave a window in which the address changed between the
+   * check and the delete — so the typed address is matched against the same snapshot the delete
+   * runs on. Exact comparison: `email` is stored trim+lowercase behind a CHECK constraint, and the
+   * DTO normalises the submitted value the same way, so there is nothing left for a case-insensitive
+   * match to forgive.
+   *
+   * THE CASCADE IS THE SCHEMA'S, NOT THIS METHOD'S. Sessions, identities, avatar, settings, tasks,
+   * focus sessions, gamification and the report subscription all declare `onDelete: Cascade`, so one
+   * delete removes them. `admin_audit_events` deliberately does not — it is `SET NULL` — which is
+   * why the audit row below is written *before* the delete and why its email snapshot is the record
+   * that survives.
+   *
+   * @returns what was destroyed, as counts.
+   */
+  async deleteForAdmin(
+    targetId: string,
+    confirmEmail: string,
+    context: AdminActionContext,
+    check: AdminRuleCheck,
+  ): Promise<AdminActionResult<{ tasks: number; focusSessions: number }>> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await readRuleTarget(tx, targetId);
+      if (!target) return { ok: false, refusal: 'not_found' };
+
+      const violation = check(target.rules, await countAdmins(tx));
+      if (violation) return { ok: false, refusal: violation };
+
+      if (confirmEmail !== target.email) return { ok: false, refusal: 'email_mismatch' };
+
+      const [tasks, focusSessions] = await Promise.all([
+        tx.task.count({ where: { userId: targetId } }),
+        tx.focusSession.count({ where: { userId: targetId } }),
+      ]);
+
+      /*
+       * Written first, while the foreign key still resolves. The delete then nulls `target_user_id`
+       * through `ON DELETE SET NULL` and leaves the row — with its email snapshot — standing. Doing
+       * it the other way round would work too, but only because the column is nullable; this order
+       * states the intent, which is that the record of the deletion is created by the deletion.
+       */
+      await writeAudit(tx, {
+        action: 'user.deleted',
+        actorUserId: context.actorId,
+        actorEmailSnapshot: context.actorEmail,
+        targetUserId: targetId,
+        targetEmailSnapshot: target.email,
+        metadata: { counts: { tasks, focusSessions } },
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      await tx.user.delete({ where: { id: targetId } });
+
+      return { ok: true, value: { tasks, focusSessions } };
+    });
+  }
+}
+
+/* ------------------------------------------------------ Transaction helpers -- */
+/*
+ * Shared by the administration methods above, and deliberately module-private: they take a
+ * transaction client, so exposing them would be exposing a way to run an unscoped write outside one.
+ */
+
+/** The subset of the client these helpers need — narrow enough that no ORM type escapes the file. */
+type AdminTx = Pick<PrismaService, 'user' | 'authSession' | 'adminAuditEvent'>;
+
+/**
+ * The target row, as the rules need it plus the email the audit row snapshots.
+ *
+ * `hasCredential` is what §6.7's promotion control turns on: an account with neither a password nor
+ * a linked identity cannot sign in, so promoting it would create an administrator who never can.
+ */
+async function readRuleTarget(
+  tx: AdminTx,
+  id: string,
+): Promise<{ email: string; rules: RoleRuleTarget } | null> {
+  const row = await tx.user.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      disabledAt: true,
+      passwordHash: true,
+      _count: { select: { identities: true } },
+    },
+  });
+  if (!row) return null;
+
+  return {
+    email: row.email,
+    rules: {
+      id: row.id,
+      // Narrowed the same way every other projection narrows it: a stored value outside the CHECK
+      // constraint reads as an ordinary user rather than being trusted as-is.
+      role: row.role === 'admin' ? 'admin' : 'user',
+      disabled: row.disabledAt !== null,
+      hasCredential: row.passwordHash !== null || row._count.identities > 0,
+    },
+  };
+}
+
+/**
+ * How many accounts hold the admin role, counted under the caller's transaction snapshot.
+ *
+ * Read on every administrative write rather than only the ones that could empty the set, so the
+ * rule check has the same inputs everywhere and no call site has to decide whether rule 3 applies.
+ * It is a count over a table of this size — the schema's own note on why `role` carries no index.
+ */
+async function countAdmins(tx: AdminTx): Promise<number> {
+  return tx.user.count({ where: { role: 'admin' } });
+}
+
+/**
+ * Append one audit row.
+ *
+ * INSERT ONLY, AND THERE IS NO OTHER WRITER. No update path and no delete path exists anywhere in
+ * the application for `admin_audit_events` — ADR-006's append-only discipline applied to a second
+ * table. `metadata` arrives as the typed union from `domain/admin-audit.ts`, never as a spread
+ * request body, which is what keeps a future DTO field from landing credential material in the
+ * trail.
+ */
+async function writeAudit(tx: AdminTx, entry: AdminAuditEntry): Promise<void> {
+  await tx.adminAuditEvent.create({
+    data: {
+      action: entry.action,
+      actorUserId: entry.actorUserId,
+      actorEmailSnapshot: entry.actorEmailSnapshot,
+      targetUserId: entry.targetUserId,
+      targetEmailSnapshot: entry.targetEmailSnapshot,
+      metadata: entry.metadata,
+      requestId: entry.requestId,
+      ip: entry.ip,
+      userAgent: entry.userAgent,
+    },
+  });
 }

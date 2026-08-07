@@ -429,6 +429,18 @@ export class SessionRepository {
     return state;
   }
 
+  /**
+   * How many focus sessions an account has recorded, for the admin detail view (§6.2).
+   *
+   * The same reasoning as `TaskRepository.countForAdmin`, and the more important half of it: a
+   * focus-session row carries `task_title_snapshot`, which is the user's own text about their own
+   * work. An operator can see that an account recorded 318 sessions and cannot see what any of them
+   * was for. There is no admin method here that returns a row.
+   */
+  async countForAdmin(userId: string): Promise<number> {
+    return this.prisma.focusSession.count({ where: { userId } });
+  }
+
   /** Every account that has a projection or any recorded session. Used by the rebuild command. */
   async listUserIdsWithSessions(): Promise<string[]> {
     const rows = await this.prisma.focusSession.findMany({
