@@ -57,6 +57,21 @@ model User {
   /// IANA zone name. Load-bearing: every stored instant for this account is read through it.
   timezone String @default("UTC") @db.VarChar(64)
 
+  /// 'user' | 'admin'. VarChar + CHECK rather than a Prisma enum, matching this schema's refusal of
+  /// them elsewhere (`auth_identities.provider`, `tasks.status`): widening a CHECK is a migration
+  /// somebody reads, where widening an enum is a generated type change.
+  ///
+  /// `DEFAULT 'user'` **is** the default-role mechanism, and it lives here rather than in a service
+  /// deliberately — every existing row became 'user' at ALTER time and every future insert inherits
+  /// it without any code stating it, so no write path can bypass the default by forgetting to.
+  ///
+  /// Nothing in the application writes this column: neither `CreateUserInput` nor
+  /// `CreateUserFromIdentityInput` nor `UpdateProfileInput` carries a `role` field, and the
+  /// repository builds Prisma's `data` from those typed inputs, so a public request body cannot
+  /// reach it by spread. It is currently **read** only to be echoed on `UserProfile`; no guard,
+  /// route or rule gates on it yet.
+  role String @default("user") @db.VarChar(16)
+
   /// Written by a verified Google sign-in (ADR-008a) — the first and only writer. Still **read** by
   /// nothing: no guard, route or rule gates on it, and none may until the verification flow exists.
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
@@ -77,6 +92,22 @@ model User {
   /// without ever loading the bytes.
   avatarUpdatedAt DateTime? @map("avatar_updated_at") @db.Timestamptz(3)
 
+  /// When an administrator disabled the account, or null while it is active.
+  ///
+  /// THE STATUS IS THIS COLUMN, READ. `GET /admin/users` derives 'active' | 'disabled' from it and
+  /// filters on it; there is deliberately no `status` column, because a second column holding the
+  /// same fact is a second thing to keep in step and the two would disagree the first time a disable
+  /// failed halfway.
+  ///
+  /// Nullable and unwritten by any code path — the timestamp arrives with `POST /admin/users/:id/
+  /// disable` (`admin_role_plan.md` §6.4), which is not built. Ships now so that feature is a pure
+  /// addition rather than a migration, exactly as `tasks.estimated_pomodoros` did.
+  ///
+  /// **Read by nothing that grants or refuses anything.** `JwtGuard` does not consult it, login does
+  /// not consult it, and the JWT claim set is unchanged. A disabled account can still sign in today;
+  /// nothing may be built on the assumption that it cannot.
+  disabledAt DateTime? @map("disabled_at") @db.Timestamptz(3)
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -89,6 +120,18 @@ model User {
   identities         AuthIdentity[]
   reportSubscription ReportSubscription?
 
+  /// The admin directory's sort and cursor key (`admin_role_plan.md` §6.1). Descending on both
+  /// columns because the list is read newest-first and the keyset predicate walks it in exactly that
+  /// order — an ascending index would be usable but would make Postgres scan it backwards.
+  ///
+  /// The id is in the index rather than only in the cursor so a tie on `created_at` is resolved by
+  /// the index itself: two accounts registered in the same millisecond must not be able to straddle
+  /// a page boundary and lose one of themselves.
+  ///
+  /// Nothing else needs it. Searching by prefix rides the unique indexes `email` and
+  /// `username_lower` already carry, and the role and status filters are selective enough on a table
+  /// of this size that indexing them would cost writes to save nothing.
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
   @@map("users")
 }
 

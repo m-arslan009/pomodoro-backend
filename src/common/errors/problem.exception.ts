@@ -86,6 +86,30 @@ export function sessionConflictProblem(detail: string): ProblemException {
   });
 }
 
+/**
+ * "There is no such route here" — for a namespace that must not admit it exists.
+ *
+ * DELIBERATELY INDISTINGUISHABLE FROM AN UNMATCHED ROUTE, and that is the entire specification. The
+ * admin namespace answers 404 rather than 403 to a non-admin (`admin_role_plan.md` §4.2), so that a
+ * curious account learns nothing from probing it: 403 confirms the endpoint is real and that someone
+ * has access to it, which is exactly the map an attacker is drawing.
+ *
+ * The rendered body must therefore match, byte for byte, what an unmatched URL produces. Nest's own
+ * `NotFoundException` reaches `ProblemDetailsFilter`'s generic `HttpException` branch, which reads
+ * `error` for the title and sets no `detail` — hence the capitalised `'Not Found'` (not this file's
+ * usual `'Not found'`) and hence the absence of a detail string, which would otherwise be the tell
+ * that distinguishes a guarded route from a nonexistent one.
+ *
+ * Never use this for a resource that is genuinely missing but whose route is public — that is
+ * `notFoundProblem`, which says something useful because it safely can.
+ */
+export function routeNotFoundProblem(): ProblemException {
+  return new ProblemException({
+    status: HttpStatus.NOT_FOUND,
+    title: 'Not Found',
+  });
+}
+
 /** No usable access token: absent, malformed, expired or foreign — all indistinguishable. */
 export function notAuthenticatedProblem(): ProblemException {
   return new ProblemException({

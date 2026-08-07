@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import type { UserRecord } from '../common/types/user.types';
+import type { AdminUserRow, UserRecord } from '../common/types/user.types';
+import { decodeCursor, paginate } from '../common/utils/cursor';
 import { PrismaService } from '../database/prisma.service';
+import type { AdminUserRole, AdminUserStatus } from '../domain/admin-user';
 
 /*
  * The only component allowed to read or write the users table (ADR-020).
@@ -53,6 +55,38 @@ export interface UpdateProfileInput {
 export type UpdateProfileResult =
   { readonly ok: true; readonly user: UserRecord | null } | { readonly ok: false };
 
+/**
+ * The directory read's filters. Every field is already validated and normalised by the time it
+ * arrives — `search` in particular is the lowercase storage form, not what the operator typed.
+ */
+export interface ListAdminUsersOptions {
+  /** A lowercase prefix, matched against `email` and `username_lower`. */
+  readonly search?: string;
+  readonly role?: AdminUserRole;
+  readonly status?: AdminUserStatus;
+  readonly cursor?: string;
+  readonly limit: number;
+}
+
+/**
+ * The columns the admin directory may read — and the only reason no credential can leak into it.
+ *
+ * This object and `AdminUserRow` have to agree, and TypeScript checks that they do. Widening it is
+ * therefore a deliberate, visible act: `password_hash` is one word away, and the type is what stops
+ * that word from being typed absent-mindedly.
+ */
+const ADMIN_USER_FIELDS = {
+  id: true,
+  email: true,
+  username: true,
+  firstName: true,
+  lastName: true,
+  role: true,
+  emailVerifiedAt: true,
+  disabledAt: true,
+  createdAt: true,
+} as const;
+
 /** Prisma's unique-constraint failure, detected structurally so no ORM type escapes this file. */
 function isUniqueViolation(error: unknown): error is { code: string; meta?: { target?: unknown } } {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
@@ -78,6 +112,95 @@ export class UserRepository {
   /** Lookup by the case-insensitive uniqueness key, never by the display username. */
   async findByUsernameKey(usernameLower: string): Promise<UserRecord | null> {
     return this.prisma.user.findUnique({ where: { usernameLower } });
+  }
+
+  /**
+   * One page of the account directory, newest first (`admin_role_plan.md` §6.1).
+   *
+   * THE ONE READ IN THIS FILE THAT IS NOT SCOPED TO A SINGLE ACCOUNT, and the only one there will
+   * be. ADR-010 makes ownership a query constraint rather than a check afterwards, and every other
+   * method here addresses exactly one row by a key the caller already holds. This one deliberately
+   * addresses all of them — which is why it lives behind `AdminGuard` and why it selects through an
+   * allow-list instead of returning `UserRecord`.
+   *
+   * It is also the reason there is no `AdminUserRepository`: ADR-020 gives the `users` table exactly
+   * one component that touches it, and a second repository over the same table is precisely what
+   * that rule exists to prevent.
+   *
+   * CURSOR, NEVER OFFSET. Sort is fixed `created_at DESC, id DESC` and is not client-selectable —
+   * a client-chosen sort key means a client-chosen cursor key, which is how keyset pagination
+   * quietly turns back into offset pagination. There is no total count either: `COUNT(*)` over a
+   * filtered search is a second full query, and cursor pagination has no page count to report.
+   *
+   * `q` is a PREFIX match, not `contains`. A substring search would force a sequential scan over the
+   * one table every authenticated request already reads; a prefix stays on the unique indexes that
+   * `email` and `username_lower` already carry (§1.1). Stated so it is not "improved" into
+   * `contains` later.
+   */
+  async listForAdmin(
+    options: ListAdminUsersOptions,
+  ): Promise<{ users: AdminUserRow[]; nextCursor: string | null }> {
+    const cursor = decodeCursor(options.cursor);
+
+    const rows = await this.prisma.user.findMany({
+      where: {
+        ...(options.role ? { role: options.role } : {}),
+        /*
+         * The derived status, expressed against the column it is derived from. Two separate spreads
+         * rather than a ternary chain so that "no status filter" is the absence of both rather than
+         * a third branch someone has to notice.
+         */
+        ...(options.status === 'active' ? { disabledAt: null } : {}),
+        ...(options.status === 'disabled' ? { disabledAt: { not: null } } : {}),
+
+        /*
+         * BOTH DISJUNCTIONS GO IN `AND`, and this is not stylistic. The search and the cursor are
+         * each an `OR`, and two `OR` keys in one object literal is a silent overwrite — the second
+         * wins and the first vanishes. That failure would page correctly while ignoring the search
+         * box, which is the kind of bug that reads as a backend "returning everything" rather than
+         * as a lost predicate.
+         */
+        AND: [
+          ...(options.search
+            ? [
+                {
+                  OR: [
+                    { email: { startsWith: options.search } },
+                    { usernameLower: { startsWith: options.search } },
+                  ],
+                },
+              ]
+            : []),
+          /*
+           * Strictly after the last row of the previous page, in the same order the query sorts by.
+           * The id breaks ties, so two accounts created in the same millisecond cannot straddle a
+           * page boundary and lose one of themselves.
+           */
+          ...(cursor
+            ? [
+                {
+                  OR: [
+                    { createdAt: { lt: cursor.timestamp } },
+                    { createdAt: cursor.timestamp, id: { lt: cursor.id } },
+                  ],
+                },
+              ]
+            : []),
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      // One more than asked for: the extra row answers "is there another page?" without a second
+      // COUNT over the same predicate, and is never returned.
+      take: options.limit + 1,
+      select: ADMIN_USER_FIELDS,
+    });
+
+    const { items, nextCursor } = paginate(rows, options.limit, (row) => ({
+      timestamp: row.createdAt,
+      id: row.id,
+    }));
+
+    return { users: items, nextCursor };
   }
 
   /**

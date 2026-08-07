@@ -8,6 +8,7 @@ import { stdSerializers } from 'pino';
 import { HealthController } from './controllers/health.controller';
 import { type Env, validateEnv } from './config/env.schema';
 import { PrismaModule } from './database/prisma.module';
+import { AdminModule } from './modules/admin.module';
 import { AuthModule } from './modules/auth.module';
 import { ReportModule } from './modules/report.module';
 import { SessionModule } from './modules/session.module';
@@ -121,6 +122,7 @@ interface SerializedRequest {
     TaskModule,
     SessionModule,
     ReportModule,
+    AdminModule,
   ],
   controllers: [HealthController],
   providers: [

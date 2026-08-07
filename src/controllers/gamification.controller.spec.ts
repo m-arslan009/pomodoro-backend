@@ -23,6 +23,7 @@ const PROFILE: UserProfile = {
   firstName: 'Ada',
   lastName: 'Lovelace',
   timezone: 'Europe/London',
+  role: 'user',
   emailVerified: false,
   avatarUpdatedAt: null,
   createdAt: '2026-07-28T09:00:00.000Z',
