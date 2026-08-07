@@ -885,3 +885,70 @@ administrator?" answered outside it lets two concurrent demotions each see two a
 empty the set. The detail payload is a fan-out across six owning repositories rather than a join,
 each with its own narrow admin projection — which is how `provider_subject`, the session digests, the
 report token hashes and `last_error` stay out of it by construction rather than by being stripped.]
+
+
+## Task CRUD — end-to-end proof against a real database
+
+`Title`: Focused e2e coverage for the Timer task CRUD flow and its ownership boundary
+
+`User prompt`: Analyze the existing Timer feature first, specifically how task CRUD operations are
+currently implemented across the frontend/backend, and then add focused test case(s) covering only
+the core task-management flow. Follow the project's existing testing conventions, helpers, factories,
+and test structure; do not introduce new testing infrastructure or unnecessary abstractions. Cover
+the essential CRUD behavior only: create a task with valid data and verify it is persisted/returned
+correctly; fetch/list tasks and verify the created task is available to its owner; update the task
+and verify the changed fields are persisted; delete the task and verify it is no longer available.
+Also include only the most important ownership check if the existing feature supports user-scoped
+tasks: one user must not be able to read, update, or delete another user's task. Base the tests on
+the actual Timer/task implementation rather than assumptions. Use the real endpoints, DTO shapes,
+validation rules, authentication setup, and response formats already present in the codebase. Avoid
+covering every validation edge case, pagination variation, UI state, timer/session behavior, or
+unrelated feature. Do not modify production behavior unless a genuine issue prevents the intended
+CRUD flow from working.
+
+[The gap this fills is a layer, not a feature. Every task layer already had a unit spec — controller,
+service, repository, DTO, domain, mapper — and all six assert against fakes; the repository spec in
+particular proves the query it BUILDS and says so in its own header, leaving "does Postgres honour
+the predicate" to e2e. So the new file is `test/tasks.e2e-spec.ts`, the second e2e spec, following
+`auth.e2e-spec.ts` exactly: ThrottlerGuard overridden, `main.ts`'s prefix and problem filter applied
+by hand, random `e2e_<hex>` registrations, teardown by email. Two tests, because there are two facts:
+a task round-trips through all four verbs with the row moving underneath it, and a second account
+gets 404 — asserted as INDISTINGUISHABLE from a `randomUUID()` that belongs to nobody, since a 403
+would confirm the id exists (ADR-010) — with the owner's row verified unchanged afterwards, so an API
+that refused and patched anyway cannot pass. Frontend needed nothing: `src/tests/backlog/task-crud.test.jsx`
+already covers the UI half. No production code changed.]
+
+## Admin Audit backend — the append-only trail and the §6.8 read endpoint
+
+Implement the backend for Admin Audit using the existing admin architecture and conventions. Add the
+admin_audit_events append-only table/model and repository/service/controller support needed for audit
+logging. Each audit record should store the actor user id/email snapshot, target user id/email
+snapshot, action, typed metadata, request id, IP, user agent, and timestamp. Use ON DELETE SET NULL
+for user references so audit history survives user deletion, and never expose or store passwords,
+hashes, tokens, cookies, OAuth secrets, provider identifiers, report delivery errors, or other
+credential material. Record audit events for the existing state-changing admin actions such as
+user.disabled, user.reactivated, user.role_changed, user.sessions_revoked, admin bootstrap, user
+deletion if already implemented, and relevant security events such as refresh-token reuse. Audit
+writes must happen inside the same transaction as the mutation so a successful action and its audit
+row commit together, while a rolled-back action produces no audit record. Do not audit normal
+GET/read operations. Implement GET /api/v1/admin/audit-events, protected by the existing JwtGuard and
+AdminGuard. Support the defined filters targetUserId, actorUserId, action, from, to, cursor, and
+limit, with cursor pagination on (created_at, id) ordered descending. Return only the fields required
+by the frontend: action, actor, target, metadata, requestId, ip, userAgent, createdAt, and
+nextCursor. Follow the project's existing DTO validation, repository, service, transaction,
+error-handling, and response conventions. Reuse the existing request context for request ID, IP, and
+user agent rather than creating duplicate plumbing. After implementation, verify that the
+already-built Admin Audit frontend calls GET /api/v1/admin/audit-events with the correct query
+parameters and response shape. Do not redesign the frontend or implement unrelated admin
+stats/settings functionality.
+
+[Completes the audit surface, and the work was mostly the half that did not exist. The table, the
+model, the ON DELETE SET NULL foreign keys and the five in-transaction writes were already built; the
+read endpoint, its repository, service, controller and DTO were not, and neither was any writer for
+the two system-originated actions §5.2 specifies. Widening the action CHECK constraint was the
+precondition for those two — the constraint had been pinned to the five admin actions, so
+`security.refresh_reuse_detected` would have been refused by the database. Reuse detection moved from
+a bare `revokeAllForUser` to a transaction in `UserRepository` that revokes and records together,
+because that is the one component permitted to touch users, auth_sessions and admin_audit_events at
+once. The read side is deliberately a separate repository with no write method, so the component that
+reads the trail is not the component that can append to it.]

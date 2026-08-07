@@ -21,16 +21,53 @@
  * records who called what and when (ADR-016), joined to these rows by `request_id`.
  */
 
-/** Every action that may be written. Mirrors the database CHECK constraint exactly. */
+/**
+ * Every action that may be written. Mirrors the database CHECK constraint exactly.
+ *
+ * TWO OF THEM HAVE NO ADMINISTRATOR BEHIND THEM, and they are the reason `actorUserId` below is
+ * nullable. `admin.bootstrap_granted` is written by the deploy-shell script that creates the first
+ * operator — there is no signed-in admin at that moment by definition, since the point of the script
+ * is that none exists yet. `security.refresh_reuse_detected` is written by `refresh-token.service.ts`
+ * when a spent refresh token is presented again: the system detected it, nobody performed it, and the
+ * "actor" is a replay we cannot attribute. Both record `'system:cli'` / `'system'` in the actor
+ * snapshot so the row still says *what* wrote it.
+ *
+ * `security.refresh_reuse_detected` is the one writer outside the admin namespace, and it is
+ * deliberate (`admin_role_plan.md` §5.2): reuse detection already revokes every session the account
+ * holds, which is a real security event with a user target and no credential material in it.
+ * Recording it gives the audit page genuine security content for one extra call site and no new
+ * table.
+ *
+ * LOGIN FAILURES ARE NOT HERE AND MUST NOT BE ADDED. Volume makes them a log-and-alert concern
+ * (ADR-016), and a per-attempt table on an unauthenticated route is a write amplifier an attacker
+ * controls.
+ */
 export const ADMIN_AUDIT_ACTIONS = [
   'user.disabled',
   'user.reactivated',
   'user.role_changed',
   'user.sessions_revoked',
   'user.deleted',
+  'admin.bootstrap_granted',
+  'security.refresh_reuse_detected',
 ] as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[number];
+
+/**
+ * The actor snapshot written when no account performed the action.
+ *
+ * A string rather than a null, because `actor_email_snapshot` is NOT NULL and because "the system
+ * did this" is a fact worth recording rather than an absence. The nullable half is `actorUserId`,
+ * which genuinely has no row to point at.
+ */
+export const SYSTEM_ACTOR_EMAIL = 'system';
+export const SYSTEM_CLI_ACTOR_EMAIL = 'system:cli';
+
+/** The audit feed's page bounds (`admin_role_plan.md` §6.8). */
+export const ADMIN_AUDIT_LIMIT_MIN = 1;
+export const ADMIN_AUDIT_LIMIT_MAX = 100;
+export const ADMIN_AUDIT_LIMIT_DEFAULT = 50;
 
 /**
  * The per-action detail, as a discriminated union.
@@ -47,7 +84,18 @@ export type AdminAuditMetadata =
   | { readonly from: string; readonly to: string }
   | { readonly revoked: number }
   /** What was destroyed, as counts. Never the rows themselves. */
-  | { readonly counts: { readonly tasks: number; readonly focusSessions: number } };
+  | { readonly counts: { readonly tasks: number; readonly focusSessions: number } }
+  /** How the first administrator was granted. `'cli'` is the only route that exists. */
+  | { readonly via: 'cli' }
+  /**
+   * A detected replay, and the blast radius it caused.
+   *
+   * THE COUNT IS THE WHOLE RECORD. Not the presented token, not its digest, not the session id, not
+   * the cookie — a replayed credential is still a credential, and §5.3 forbids every one of those
+   * from reaching this table. How many sessions the detection revoked is what an operator needs to
+   * understand the event, and it discloses nothing that could be replayed again.
+   */
+  | { readonly sessionsRevoked: number };
 
 /**
  * One row, as the repository takes it.
@@ -58,7 +106,12 @@ export type AdminAuditMetadata =
  */
 export interface AdminAuditEntry {
   readonly action: AdminAuditAction;
-  readonly actorUserId: string;
+  /**
+   * Null for a system-written event, and null once the acting account is deleted. The snapshot
+   * beside it is the record in both cases — see `ADMIN_AUDIT_ACTIONS` for which actions have no
+   * actor by construction.
+   */
+  readonly actorUserId: string | null;
   readonly actorEmailSnapshot: string;
   /** Null once the account is gone — which is exactly the case a deletion row describes. */
   readonly targetUserId: string | null;

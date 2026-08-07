@@ -330,7 +330,7 @@ describe('OAuthService', () => {
       new FakeHasher(),
       clock,
       new AccessTokenService(new JwtService({ secret: SIGNING_KEY }), config),
-      new RefreshTokenService(authSessions, clock, config),
+      new RefreshTokenService(authSessions, users, clock, config),
     );
 
     service = new OAuthService(users, identities, google, transactions, auth, clock);

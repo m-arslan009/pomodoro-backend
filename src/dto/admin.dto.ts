@@ -1,5 +1,11 @@
 import { z } from 'zod';
 import {
+  ADMIN_AUDIT_ACTIONS,
+  ADMIN_AUDIT_LIMIT_DEFAULT,
+  ADMIN_AUDIT_LIMIT_MAX,
+  ADMIN_AUDIT_LIMIT_MIN,
+} from '../domain/admin-audit';
+import {
   ADMIN_SEARCH_MAX_LENGTH,
   ADMIN_USERS_LIMIT_DEFAULT,
   ADMIN_USERS_LIMIT_MAX,
@@ -53,6 +59,55 @@ export const listAdminUsersQuerySchema = z.strictObject({
     .default(ADMIN_USERS_LIMIT_DEFAULT),
 });
 export type ListAdminUsersQueryDto = z.infer<typeof listAdminUsersQuerySchema>;
+
+/**
+ * `GET /admin/audit-events` (§6.8) — the audit feed's filters.
+ *
+ * `strictObject` for the reason stated above, and it matters as much here as on the directory: a
+ * misspelled `?actorId=…` must fail loudly rather than silently returning the whole record while the
+ * operator believes they are looking at one person's actions.
+ *
+ * THE ACTION ENUM IS THE FULL §5.2 SET, INCLUDING THE TWO NOBODY PERFORMS. `admin.bootstrap_granted`
+ * and `security.refresh_reuse_detected` are written by the CLI and by reuse detection rather than by
+ * any route in this namespace — filtering them out here would make the two most security-relevant
+ * rows in the table the only ones an operator cannot isolate.
+ *
+ * BOTH DATES ARE INCLUSIVE and are compared as instants, not as calendar days. The client sends whole
+ * local days widened to ISO instants, because "the 6th" means the 6th where the operator is sitting;
+ * the server never has to guess a timezone, which is why `offset: true` is required rather than
+ * accepting a bare local timestamp.
+ */
+export const listAuditEventsQuerySchema = z
+  .strictObject({
+    /** Both ids are uuids: the feed filters on identity, never on an address. */
+    targetUserId: z.uuid('Provide a valid user id.').optional(),
+    actorUserId: z.uuid('Provide a valid user id.').optional(),
+
+    action: z.enum(ADMIN_AUDIT_ACTIONS, 'Filter by a supported action.').optional(),
+
+    from: z.iso.datetime({ offset: true, error: 'Provide an ISO-8601 timestamp.' }).optional(),
+    to: z.iso.datetime({ offset: true, error: 'Provide an ISO-8601 timestamp.' }).optional(),
+
+    /** Opaque, and produced only by a previous response. An unparseable one starts from the top. */
+    cursor: z.string().min(1).optional(),
+
+    limit: z.coerce
+      .number()
+      .int()
+      .min(ADMIN_AUDIT_LIMIT_MIN)
+      .max(ADMIN_AUDIT_LIMIT_MAX)
+      .default(ADMIN_AUDIT_LIMIT_DEFAULT),
+  })
+  /*
+   * An inverted range is refused rather than quietly returning nothing. Both readings of an empty
+   * result — "nothing happened in this window" and "these two dates are the wrong way round" — look
+   * identical on an audit page, and only one of them is worth acting on.
+   */
+  .refine((query) => !query.from || !query.to || query.from <= query.to, {
+    error: 'The start of the range must not be after its end.',
+    path: ['from'],
+  });
+export type ListAuditEventsQueryDto = z.infer<typeof listAuditEventsQuerySchema>;
 
 /*
  * The write bodies.

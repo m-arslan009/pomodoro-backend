@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import type { SecurityEventContext } from '../common/types/admin-audit.types';
 import type { AdminActionContext, AdminUserDetailRow } from '../common/types/admin.types';
 import type { AdminUserRow, UserRecord } from '../common/types/user.types';
 import { decodeCursor, paginate } from '../common/utils/cursor';
 import { PrismaService } from '../database/prisma.service';
+import { SYSTEM_ACTOR_EMAIL } from '../domain/admin-audit';
 import type { AdminAuditEntry } from '../domain/admin-audit';
 import type { AdminUserRole, AdminUserStatus } from '../domain/admin-user';
 import type { RoleRuleTarget, RoleRuleViolation } from '../domain/role';
@@ -670,6 +672,64 @@ export class UserRepository {
       await tx.user.delete({ where: { id: targetId } });
 
       return { ok: true, value: { tasks, focusSessions } };
+    });
+  }
+
+  /* --------------------------------------------------------- Security events -- */
+
+  /**
+   * Revoke every session an account holds because a spent refresh token was presented again, and
+   * record why — atomically (`admin_role_plan.md` §5.2).
+   *
+   * THE ONE AUDITED WRITE THAT NO ADMINISTRATOR PERFORMED. `actorUserId` is null and the snapshot
+   * says `'system'`: reuse detection is the server noticing something, not an operator doing
+   * something, and inventing an actor for it would put a false statement in the trail. It lives in
+   * this section anyway because it is the same privilege the section describes — a write against an
+   * account the caller does not own — and because the transaction it needs is the one the methods
+   * above already establish: read the target, mutate, append exactly one audit row, commit together.
+   *
+   * WHY IT IS HERE AND NOT IN `AuthSessionRepository`. That repository owns `auth_sessions` and
+   * could revoke them, but it owns neither `users` nor `admin_audit_events` — and this operation
+   * needs all three in one transaction, because an audit row that commits separately from the
+   * revocation it describes is not evidence of anything. `UserRepository` is already the one
+   * component permitted to write all three together, which is exactly what `disableForAdmin` does.
+   *
+   * IT IS AUDITED EVEN WHEN IT REVOKES NOTHING. A replay against an account whose sessions were
+   * already cut revokes zero rows, and that is still a detection worth recording — the count is the
+   * blast radius, not the event. What is never recorded is the token, its digest, the session id or
+   * the cookie: §5.3 forbids all four, and `metadata` carries a single integer.
+   *
+   * An account that no longer exists writes nothing. There is no target to snapshot, and a row whose
+   * target is unidentifiable is an entry nobody can act on.
+   *
+   * @returns how many live sessions the detection revoked.
+   */
+  async recordRefreshReuse(
+    userId: string,
+    context: SecurityEventContext,
+  ): Promise<{ sessionsRevoked: number }> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await tx.user.findUnique({ where: { id: userId }, select: { email: true } });
+      if (!target) return { sessionsRevoked: 0 };
+
+      const revoked = await tx.authSession.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: context.now },
+      });
+
+      await writeAudit(tx, {
+        action: 'security.refresh_reuse_detected',
+        actorUserId: null,
+        actorEmailSnapshot: SYSTEM_ACTOR_EMAIL,
+        targetUserId: userId,
+        targetEmailSnapshot: target.email,
+        metadata: { sessionsRevoked: revoked.count },
+        requestId: context.requestId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      return { sessionsRevoked: revoked.count };
     });
   }
 }

@@ -6,6 +6,7 @@ import type { DeviceContext, IssuedRefreshToken } from '../common/types/auth-ses
 import type { Env } from '../config/env.schema';
 import { absoluteExpiryFor, isUsable, nextIdleExpiry } from '../domain/auth-session';
 import { AuthSessionRepository } from '../repositories/auth-session.repository';
+import { UserRepository } from '../repositories/user.repository';
 
 /*
  * The refresh half of the credential pair (ADR-008 rev. 3): minting, hashing, rotation, revocation,
@@ -49,6 +50,13 @@ export class RefreshTokenService {
 
   constructor(
     private readonly sessions: AuthSessionRepository,
+    /*
+     * For reuse detection alone. `UserRepository` is the one component permitted to write
+     * `auth_sessions`, `users` and `admin_audit_events` in a single transaction, which is what
+     * recording a replay atomically requires — see `recordRefreshReuse`. Nothing else in this
+     * service touches it.
+     */
+    private readonly users: UserRepository,
     private readonly clock: Clock,
     config: ConfigService<Env, true>,
   ) {
@@ -116,8 +124,23 @@ export class RefreshTokenService {
     if (!existing) return { ok: false, reason: 'unknown' };
 
     if (!isUsable(existing, now)) {
+      /*
+       * A revoked row is a REPLAY, and it is recorded as a security event, not just acted on.
+       * `recordRefreshReuse` revokes every session and appends the `security.refresh_reuse_detected`
+       * audit row in one transaction, so the sign-out and the record of why it happened commit
+       * together — an operator seeing an account signed out everywhere can find the reason, which
+       * before this was visible only in an ephemeral log line.
+       *
+       * Expiry takes the other branch and writes nothing: a token that simply aged out is not an
+       * event, and auditing it would bury the replays under the ordinary ones.
+       */
       if (existing.revokedAt !== null) {
-        await this.sessions.revokeAllForUser(existing.userId, now);
+        await this.users.recordRefreshReuse(existing.userId, {
+          requestId: device.requestId ?? null,
+          ip: device.ip,
+          userAgent: device.userAgent,
+          now,
+        });
       }
       return { ok: false, reason: 'unusable' };
     }

@@ -25,8 +25,21 @@ export interface IssuedRefreshToken {
   readonly expiresAt: Date;
 }
 
-/** What the request tells us about the device, for the forensic columns. Both optional. */
+/**
+ * What the request tells us about the device, for the forensic columns. All optional.
+ *
+ * `requestId` is NOT a session column and is never written to `auth_sessions`. It rides along here
+ * because reuse detection happens deep inside `rotate()`, on this exact path, and the audit row it
+ * writes needs the id that joins it to its Pino log line and to the Problem Details `instance` of
+ * the same request (ADR-016). Carrying it on the context the path already threads is what the
+ * alternative — a second parameter plumbed through `AuthService.refresh` purely for one audit row —
+ * would have duplicated.
+ *
+ * It is optional rather than required so the call sites that have no request to read it from (the
+ * OAuth completion path, tests) construct this shape unchanged.
+ */
 export interface DeviceContext {
   readonly userAgent: string | null;
   readonly ip: string | null;
+  readonly requestId?: string | null;
 }

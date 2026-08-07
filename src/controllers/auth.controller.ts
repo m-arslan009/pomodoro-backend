@@ -59,12 +59,19 @@ function authBody(result: AuthResult): AuthResponse {
   };
 }
 
-/** Forensic columns, and the only use this controller makes of the raw request. */
+/**
+ * Forensic columns, and the only use this controller makes of the raw request.
+ *
+ * `request.id` is Pino's per-request uuid (`app.module.ts`). It is not stored on the session — see
+ * `DeviceContext` — and is carried only so a reuse detection on the refresh path can write an audit
+ * row that joins to the same request's log line.
+ */
 function deviceOf(request: Request): DeviceContext {
   const agent = request.headers['user-agent'];
   return {
     userAgent: typeof agent === 'string' ? agent.slice(0, 512) : null,
     ip: request.ip ?? null,
+    requestId: typeof request.id === 'string' ? request.id : null,
   };
 }
 

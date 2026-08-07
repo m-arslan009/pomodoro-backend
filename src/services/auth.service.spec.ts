@@ -154,7 +154,7 @@ describe('AuthService', () => {
       purgeExpiredForUser: vi.fn(() => Promise.resolve()),
     } as unknown as AuthSessionRepository;
 
-    const refreshTokens = new RefreshTokenService(authSessions, clock, config);
+    const refreshTokens = new RefreshTokenService(authSessions, users, clock, config);
 
     service = new AuthService(users, hasher, clock, accessTokens, refreshTokens);
   });
