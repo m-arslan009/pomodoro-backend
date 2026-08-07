@@ -120,11 +120,19 @@ describe('AuthIdentityRepository', () => {
        * The absence is the safeguard, so it is pinned rather than left to discipline. `email_at_link`
        * is audit material; a lookup method on it would eventually be used as one, and a user who
        * changed their Google address would then be resolved to whoever holds the old one.
+       *
+       * THIS LIST IS AN INVENTORY, NOT A STYLE CHECK. Adding a method here is meant to be a
+       * deliberate act with a reason attached, and there is exactly one so far: `listForAdmin` reads
+       * an account's linked providers for the admin detail view. It is keyed on `user_id` and selects
+       * `provider`, `linked_at` and `last_login_at` — it neither reads `email_at_link` nor accepts an
+       * address, so the property this test defends is intact. A method that took an email would not
+       * be.
        */
       expect(Object.getOwnPropertyNames(AuthIdentityRepository.prototype)).toEqual([
         'constructor',
         'findByProviderSubject',
         'create',
+        'listForAdmin',
         'touchLastLogin',
       ]);
     });
