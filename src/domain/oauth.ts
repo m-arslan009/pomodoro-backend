@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto';
+import type { UserRole } from '../common/types/user.types';
 import {
   EMAIL_MAX_LENGTH,
   NAME_MAX_LENGTH,
@@ -44,14 +45,64 @@ export function isOAuthProvider(value: string): value is OAuthProvider {
  * a genuine Evergrove link. Matching against known paths cannot be tricked by an encoding the
  * checker and the browser disagree about, which is how "reject anything with `//` or `:`" fails.
  */
-export const ALLOWED_RETURN_TO = ['/timer', '/history', '/settings', '/profile'] as const;
+export const ALLOWED_RETURN_TO = [
+  '/timer',
+  '/history',
+  '/settings',
+  '/profile',
+  /*
+   * Allow-listed so an administrator bounced off the panel by an expired session can be returned to
+   * it through Google. Listing it grants nothing — it is a path on this origin like the other four,
+   * `RequireAdmin` still decides what renders there, and the admin API refuses a non-admin on its own
+   * authority. Anyone may ask to land here; only an admin sees anything when they arrive.
+   */
+  '/admin',
+] as const;
 
+/** Where an ordinary account lands when the caller named no destination. */
 export const DEFAULT_RETURN_TO = '/timer';
 
-/** An allow-listed path, or the default. Never the caller's string, and never an absolute URL. */
-export function resolveReturnTo(raw: string | undefined): string {
-  if (raw === undefined) return DEFAULT_RETURN_TO;
-  return (ALLOWED_RETURN_TO as readonly string[]).includes(raw) ? raw : DEFAULT_RETURN_TO;
+/** Where an administrator lands instead. Mirrors the client's rule in `services/admin.js`. */
+export const ADMIN_RETURN_TO = '/admin';
+
+/**
+ * "The caller asked for nothing usable" — absent, or a value the allow-list refused.
+ *
+ * The empty string rather than `undefined` because this value is signed into the transaction cookie
+ * at `start` and read back at `callback`, and that payload's validator accepts strings only. It
+ * cannot collide with a real destination: every allow-listed entry begins with a slash.
+ */
+export const NO_RETURN_TO = '';
+
+/**
+ * The caller's requested landing page reduced to the allow-list, or `NO_RETURN_TO`.
+ *
+ * Deliberately does *not* substitute a default. `start` runs before anybody has authenticated, so at
+ * that point there is no account whose landing page could be chosen — recording "nothing was asked
+ * for" is the only honest answer available, and `resolveReturnTo` below picks the default later,
+ * once there is a profile to pick it from.
+ */
+export function normalizeReturnTo(raw: string | undefined): string {
+  if (raw === undefined) return NO_RETURN_TO;
+  return (ALLOWED_RETURN_TO as readonly string[]).includes(raw) ? raw : NO_RETURN_TO;
+}
+
+/** Which page a completed sign-in opens when nothing specific was requested. */
+export function landingPathFor(role: UserRole): string {
+  return role === 'admin' ? ADMIN_RETURN_TO : DEFAULT_RETURN_TO;
+}
+
+/**
+ * Where a completed sign-in lands: an allow-listed path, or the account's own landing page. Never
+ * the caller's string, and never an absolute URL.
+ *
+ * A REQUESTED DESTINATION ALWAYS WINS OVER THE ROLE — an admin who was sent to sign in from
+ * `/history` is returned to `/history`, not diverted to the panel. The role decides only the case
+ * where nobody said. That is the same rule the password form follows on the client, and the two are
+ * written to match.
+ */
+export function resolveReturnTo(raw: string | undefined, role: UserRole): string {
+  return normalizeReturnTo(raw) || landingPathFor(role);
 }
 
 /** 32 CSPRNG bytes, base64url. Used for `state` and `nonce` — both need only unguessability. */

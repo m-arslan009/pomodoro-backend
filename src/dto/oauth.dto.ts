@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { resolveReturnTo } from '../domain/oauth';
+import { normalizeReturnTo } from '../domain/oauth';
 import { isValidTimeZone } from '../domain/timezone';
 
 /*
@@ -10,7 +10,7 @@ import { isValidTimeZone } from '../domain/timezone';
  * by `ProblemDetailsFilter` as a JSON body, and a JSON body delivered to a top-level navigation is
  * a page of raw JSON in the user's face. So every field is normalised toward a safe value here, and
  * the *flow* decides what a missing or nonsensical one means — which for the callback is a redirect
- * carrying `?oauth_error=invalid_request`, and for start is simply the default landing page.
+ * carrying `?oauth_error=invalid_request`, and for start is simply "no destination was requested".
  *
  * Every field is read through `unknown` on purpose. Express parses `?code=a&code=b` into an array
  * and `?code[x]=y` into an object, so a schema of `z.string()` would be describing a type the
@@ -27,8 +27,13 @@ export const oauthStartQuerySchema = z
     tz: z.unknown().optional(),
   })
   .transform((raw) => ({
-    /** Already reduced to an allow-listed path — the caller's own string never survives this. */
-    returnTo: resolveReturnTo(stringOrUndefined(raw.returnTo)),
+    /**
+     * Already reduced to an allow-listed path — the caller's own string never survives this — or to
+     * `NO_RETURN_TO` when nothing usable was asked for. No default is substituted here: this route
+     * runs before anyone has authenticated, so the account whose landing page would be the default
+     * is not known yet. The callback fills it in from the profile it ends up with.
+     */
+    returnTo: normalizeReturnTo(stringOrUndefined(raw.returnTo)),
     /**
      * An unrecognised zone is dropped rather than rejected. It is a convenience the browser
      * volunteered, and refusing a whole sign-in over it would trade a working account with a UTC

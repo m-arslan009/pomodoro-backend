@@ -214,9 +214,10 @@ describe('OAuthController', () => {
 
       await controller.start('google', { returnTo: 'https://evil.test/harvest' }, response);
 
-      // The DTO reduces anything not allow-listed to the default, so no caller-supplied value
-      // survives far enough to become a `Location` header.
-      expect(startArgs[0]?.returnTo).toBe('/timer');
+      // The DTO reduces anything not allow-listed to "nothing was asked for", so no caller-supplied
+      // value survives far enough to become a `Location` header. The default is not applied here:
+      // the callback picks it from the profile it authenticates, which does not exist yet.
+      expect(startArgs[0]?.returnTo).toBe('');
     });
 
     it('passes a usable browser zone through and drops an unusable one', async () => {

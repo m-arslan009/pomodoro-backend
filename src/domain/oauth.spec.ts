@@ -71,12 +71,24 @@ describe('OAuth domain rules', () => {
 
   describe('resolveReturnTo', () => {
     it('passes an allow-listed app path through', () => {
-      expect(resolveReturnTo('/history')).toBe('/history');
-      expect(resolveReturnTo('/profile')).toBe('/profile');
+      expect(resolveReturnTo('/history', 'user')).toBe('/history');
+      expect(resolveReturnTo('/profile', 'user')).toBe('/profile');
     });
 
-    it('defaults when nothing was asked for', () => {
-      expect(resolveReturnTo(undefined)).toBe('/timer');
+    it('lands an ordinary account on the Timer when nothing was asked for', () => {
+      expect(resolveReturnTo(undefined, 'user')).toBe('/timer');
+    });
+
+    it('lands an administrator on the panel when nothing was asked for', () => {
+      // The whole point of deferring the default to the callback: at `start` nobody knew who this
+      // was, so a provider sign-in would otherwise drop every admin on the ordinary dashboard.
+      expect(resolveReturnTo(undefined, 'admin')).toBe('/admin');
+    });
+
+    it('honours a requested page over the account it belongs to', () => {
+      // An admin sent to sign in from /history is returned to /history. The role decides only the
+      // case where no destination was named.
+      expect(resolveReturnTo('/history', 'admin')).toBe('/history');
     });
 
     it('refuses anything that could leave the application', () => {
@@ -94,7 +106,7 @@ describe('OAuth domain rules', () => {
         '/timer?next=https://evil.test',
         '',
       ]) {
-        expect(resolveReturnTo(hostile)).toBe('/timer');
+        expect(resolveReturnTo(hostile, 'user')).toBe('/timer');
       }
     });
   });

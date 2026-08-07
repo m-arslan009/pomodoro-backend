@@ -729,3 +729,109 @@ the security control. It cut 54 cases to 35 and produced the project's first e2e
 `password_hash` actually holds, and that the 409 comes from the UNIQUE index rather than a pre-check.
 Two gaps the old suite had are now closed: nothing asserted the password was hashed before it reached
 the repository, and nothing asserted the refresh half of the session either flow returns.]
+
+
+`Title`: Add an ADMIN role alongside USER — capability analysis and phased plan
+
+`User prompt`: Use only `CONTRACT.md`, `backend_architecture.md`, `.claude/locked_decisions.md`, and
+`product_analysis.md` to understand the application and create a plan for adding an `ADMIN` role
+alongside `USER`. Password and OAuth authentication already exist and must remain compatible.
+First, briefly discuss realistic Admin capabilities such as viewing/searching users, viewing limited
+account details, disabling/reactivating accounts, deleting users, revoking sessions, viewing system
+statistics, reviewing audit/security events, assigning roles, and managing limited system settings.
+Group them into minimal, balanced, and advanced scopes, compare effort, value, security risk,
+database impact, frontend impact, and test burden, then recommend the best scope for this project.
+After selecting the recommended scope, create a phased implementation plan. Design all required Admin
+endpoints, including method, path, purpose, required role, request data, response shape, validation,
+errors, pagination/filtering, and audit requirements. Also cover the role field and migration,
+default `USER` assignment, first Admin creation, guards/decorators, ownership rules,
+disabled-account behavior, token/session handling, Admin frontend pages, audit logging, security
+controls, affected modules, testing strategy, rollout, and acceptance criteria.
+Public sign-up, OAuth sign-in, profile updates, and normal user APIs must never allow users to assign
+or change their own role. Admins must never access passwords, hashes, refresh tokens, OAuth secrets,
+or other credentials. Do not write code; provide only the capability analysis, recommended scope,
+endpoint design, and implementation plan.
+
+[Fires ADR-010's own revisit trigger — *"an admin surface appears… that is the point at which RBAC can
+be designed against reality rather than guesswork"* — and therefore reopens three settled positions:
+`CONTRACT.md` §12 (*"RBAC. There are no roles."*), `backend_architecture.md` §0.4 (admin back-office
+listed as a v1 non-goal), and the one-line rule that no route in the product accepts another user's
+id (§25.8, ADR-010). The two hard constraints in the instruction — role is never client-assignable on
+any public path, and no admin surface may expose credential material — are what the endpoint and DTO
+design are built around.]
+
+
+`Title`: Ship only the role field needed to see the admin frontend work
+
+`User prompt`: Update only the backend user schema/auth data needed to support the new role field so
+we can visually test the admin frontend. Add a `role` field to the user model/schema with allowed
+values `user` and `admin`, defaulting to `user`. Ensure all existing users are assigned
+`role = 'user'`, except the existing user with email [REDACTED], which must be assigned
+`role = 'admin'`. Make the minimum required migration/data update so this user can log in normally
+using the application's existing login flow and the returned authenticated `UserProfile` includes
+`role: 'admin'`. Other users should receive `role: 'user'`. Do not create a separate admin login
+flow, change passwords, modify authentication/session behavior, add admin APIs, or change any
+unrelated backend/frontend functionality. The only purpose of this change is to let that account log
+in as an admin so we can visually verify the already-built admin navigation and pages. Keep all
+existing login behavior unchanged apart from exposing the new `role` field.
+
+[Cuts `admin_role_plan.md`'s phase G1 down to its display half and defers the rest: the column, its
+CHECK, one targeted UPDATE, and `role` on `UserProfile` — but no `disabled_at`, no `AdminGuard`, no
+`/admin` namespace, no audit table, and no change to any auth path. It settles what the frontend's
+role check currently means: `role === 'admin'` chooses navigation and nothing more, with no
+server-side counterpart behind it, which is recorded in `CONTRACT.md` §2.4 and against the amended
+§12 non-goal so nothing is later built on the assumption that the field is enforced.]
+
+
+## Admin Users API — the read half of the admin namespace
+
+`Title`: Add GET /admin/users behind JwtGuard + AdminGuard, list read only
+
+`User prompt`: Implement only the backend API required for the Admin Users page. Add
+`GET /api/v1/admin/users` and protect it with the existing `JwtGuard` and `AdminGuard`, so only users
+with `role = 'admin'` can access it. Non-admin users should receive `404`. The endpoint should
+support these optional query parameters: `q`, `role`, `status`, `cursor`, and `limit`. `q` should
+perform a prefix search against normalized email and username fields. `role` should accept `user` or
+`admin`, `status` should accept `active` or `disabled`, and `limit` should allow 1–100 with a default
+of 50. Use cursor-based pagination on `(created_at, id)` ordered by `created_at DESC`; do not use
+offset/page-number pagination. Return only the explicit user summary fields required by the frontend
+(id, email, username, firstName, lastName, role, status, emailVerified). `status` should be derived
+from `disabled_at`. Do not return passwords, hashes, tokens, OAuth-sensitive fields, session details,
+task/focus-session contents, or any other credential/private information. Do not add `lastSeenAt` to
+the list response. Use the existing project architecture and conventions for DTO validation,
+repositories, services, controllers, error handling, and response types. Keep the endpoint
+read-only; no audit event is required for this GET request. Do not implement user detail,
+disable/reactivate, session revocation, role changes, audit-events API, stats API, or any frontend
+changes in this task.
+
+[Opens the `/api/v1/admin` namespace, which `CONTRACT.md` §2.4 had explicitly ruled out — so §2.4 is
+amended rather than left contradicted, and `role` stops being display-only for the first time.
+Establishes three positions the rest of `admin_role_plan.md` will build on: authorization is
+`AdminGuard` reading the role off the row `JwtGuard` just re-read (never a token claim), the
+namespace answers 404 rather than 403 so it stays invisible to a non-admin, and the response is an
+explicit allow-list type that no credential-bearing row can be passed to. Adds `users.disabled_at`
+as a read-only column — `status` is derived from it and nothing writes it, because disable and
+reactivate are not in scope.]
+
+## Post-login navigation must follow the authenticated role
+
+Fix the post-login navigation so users are redirected according to their authenticated role.
+Currently, when an admin logs in successfully, the application navigates to the normal user Timer
+page. This is incorrect. After authentication is completed and the authenticated `UserProfile` is
+available, determine the destination from `user.role`. For `role === 'admin'`, navigate to the admin
+landing page `/admin`. For `role === 'user'`, preserve the existing normal-user behavior and
+navigate to the Timer page or whatever current default user route is already used. Make sure this
+works consistently for every authentication/hydration path that can result in a logged-in user,
+including normal login and any existing session restore/refresh flow where a default redirect is
+performed. Do not create separate admin authentication logic or duplicate auth state; use the
+existing authenticated user and its role as the source of truth.
+
+[The backend half of a request that reads as a frontend one. Google sign-in ends in a server-issued
+redirect, so it is the only session-opening path the client cannot route — and `CONTRACT.md` §2.4
+had recorded that as a deliberate gap in which every admin using Google landed on `/timer`. Closing
+it moves the default from `start` to `callback`: the start DTO now records "nothing was asked for"
+as `NO_RETURN_TO` instead of substituting `/timer`, because at that moment nobody has authenticated
+and there is no account whose landing page could be chosen. `resolveReturnTo` takes the role and is
+called after `startSession`, so the redirect is decided from the same `UserProfile` the password
+flow returns. `/admin` joins `ALLOWED_RETURN_TO`, which grants nothing — `AdminGuard` is still what
+refuses a non-admin.]

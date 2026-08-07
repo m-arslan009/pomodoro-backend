@@ -157,13 +157,22 @@ export class OAuthService {
       };
     }
 
+    /*
+     * The session opens first because the landing page depends on it. Where a provider sign-in ends
+     * up is decided from the authenticated profile — an admin lands on the panel, everyone else on
+     * the Timer — and that profile does not exist until this line has run. It is the same account
+     * object the password flow returns, read the same way, so the two cannot disagree about where
+     * signing in leads.
+     */
+    const auth = await this.auth.startSession(resolution.user, device);
+
     return {
       ok: true,
       // Re-checked rather than trusted. The cookie is signed, so this cannot have been tampered
       // with — but an allow-list that shrinks between issue and callback would otherwise let a
       // ten-minute-old value through a rule that no longer permits it.
-      returnTo: resolveReturnTo(transaction.returnTo),
-      auth: await this.auth.startSession(resolution.user, device),
+      returnTo: resolveReturnTo(transaction.returnTo, auth.profile.role),
+      auth,
     };
   }
 
